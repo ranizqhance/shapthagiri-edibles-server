@@ -1,0 +1,16 @@
+node_modules
+dist
+.env
+.env.*
+!.env.example
+# generated copy of the deploy env — secrets, never committed
+dokploy-*.env
+*.log
+.DS_Store
+openapi.json
+
+# Never commit locally written uploads — object storage is S3-only.
+# Anchored with a leading slash: a bare `uploads/` also matches
+# src/modules/uploads/, which kept the whole module out of the repo and broke
+# the Docker build with "Cannot find module '@/modules/uploads/uploads.module'".
+/uploads/

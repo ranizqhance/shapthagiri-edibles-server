@@ -1,0 +1,19 @@
+node_modules
+dist
+tsconfig.tsbuildinfo
+
+# Secrets never belong in an image layer — inject at runtime via compose/env.
+.env
+.env.*
+
+.git
+.gitignore
+Dockerfile
+.dockerignore
+*.log
+.DS_Store
+openapi.json
+
+# Locally written uploads (storage is S3-only; this must never be baked in).
+# Anchored so it cannot also match src/modules/uploads.
+/uploads
