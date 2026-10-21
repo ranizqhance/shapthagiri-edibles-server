@@ -325,6 +325,10 @@ export class OrdersService {
           walletApplied = Math.max(0, Math.min(walletBalance, payableAmount, cap));
         }
         const netPayable = payableAmount - walletApplied;
+        // Cash on delivery only while online payment is switched off (ONLINE_PAYMENTS_ENABLED=false).
+        if (!env.ONLINE_PAYMENTS_ENABLED && input.paymentMethod !== PaymentMethod.COD && netPayable > 0) {
+          throw new AppBadRequestException("BAD_REQUEST", "Online payment isn't available right now. Please choose Cash on Delivery.");
+        }
         this.logger.debug(`Pricing: subtotal=${subtotal} total=${total} giftCard=${giftCardDiscount} wallet=${walletApplied} netPayable=${netPayable}`);
 
         let initialStatus = input.paymentMethod === PaymentMethod.COD ? OrderStatus.PLACED : OrderStatus.PAYMENT_PENDING;

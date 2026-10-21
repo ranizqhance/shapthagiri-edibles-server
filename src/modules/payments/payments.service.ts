@@ -55,6 +55,9 @@ export class PaymentsService {
   }
 
   async createIntent(u: JwtPayload, b: PaymentIntentDto, idemKey?: string) {
+    if (!env.ONLINE_PAYMENTS_ENABLED) {
+      throw new BadRequestException("BAD_REQUEST", "Online payment isn't available right now. Please choose Cash on Delivery.");
+    }
     const lockKey = `order:${b.orderId}`;
     const acquired = await this.lockService.acquire(lockKey, 15000);
     if (!acquired) {
@@ -100,6 +103,9 @@ export class PaymentsService {
   }
 
   async retryPayment(orderId: string, u: JwtPayload) {
+    if (!env.ONLINE_PAYMENTS_ENABLED) {
+      throw new BadRequestException("BAD_REQUEST", "Online payment isn't available right now. Please choose Cash on Delivery.");
+    }
     const lockKey = `order:${orderId}`;
     const acquired = await this.lockService.acquire(lockKey, 15000);
     if (!acquired) {
@@ -146,6 +152,9 @@ export class PaymentsService {
   }
 
   async verifyPayment(b: PaymentVerifyDto) {
+    if (!env.ONLINE_PAYMENTS_ENABLED) {
+      throw new BadRequestException("BAD_REQUEST", "Online payment isn't available right now. Please choose Cash on Delivery.");
+    }
     // 1. Verify signature
     if (!paymentProvider.verifyPaymentSignature(b.razorpay_order_id, b.razorpay_payment_id, b.razorpay_signature)) {
       throw new BadRequestException("BAD_REQUEST", "Invalid payment signature");

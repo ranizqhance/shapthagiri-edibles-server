@@ -310,7 +310,7 @@ export class AuthService {
         passwordResetExpiresAt: new Date(Date.now() + RESET_TTL_MS),
       });
 
-      const base = (env.CORS_ORIGINS.split(",")[0] || "http://localhost:3000").trim().replace(/\/$/, "");
+      const base = (env.CORS_ORIGINS.split(",")[0] || "http://localhost:9164").trim().replace(/\/$/, "");
       const resetUrl = `${base}/reset-password?token=${token}`;
 
       // Email failures must not leak (or 500) — log and still return generic.

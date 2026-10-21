@@ -64,10 +64,10 @@ npm ci
 cp .env.example .env          # then set DB_PASSWORD, DB_NAME, …
 createdb shapthagiri          # or the DB_NAME you chose
 npm run db:reset              # build the schema and seed the catalogue
-npm run start:dev             # http://localhost:5777/api/v1
+npm run start:dev             # http://localhost:9165/api/v1
 ```
 
-The storefront's `NEXT_PUBLIC_API_BASE` points at `http://localhost:5777/api/v1`.
+The storefront's `NEXT_PUBLIC_API_BASE` points at `http://localhost:9165/api/v1`.
 Its `REVALIDATE_SECRET` must equal this server's `WEB_REVALIDATE_SECRET` for
 catalogue changes to show on the storefront right away.
 
@@ -106,14 +106,14 @@ those are unset.
 - `npm run db:seed` / `db:reset` (force sync + seed; refused in production)
 
 ## Key URLs
-- API base: `http://localhost:5777/api/v1`
-- Swagger UI: `http://localhost:5777/api/docs` (Basic auth `DOCS_USER` / `DOCS_PASSWORD`)
-- Queues: `http://localhost:5777/admin/queues` (same login)
+- API base: `http://localhost:9165/api/v1`
+- Swagger UI: `http://localhost:9165/api/docs` (Basic auth `DOCS_USER` / `DOCS_PASSWORD`)
+- Queues: `http://localhost:9165/admin/queues` (same login)
 - Health: `GET /api/v1/health`, `/live` and `/ready`
 
 ## Deploying (Dokploy)
 `dokploy-api.env` is the production template; fill every empty value. The
-container (`Dockerfile`) listens on 5777. For a fresh database, deploy once
+container (`Dockerfile`) listens on 9165. For a fresh database, deploy once
 with `DB_BOOTSTRAP=1` to build the schema and run the seed, then set it back
 to 0. The API refuses to start in production while JWT secrets, the DB
 password, payment secrets, `ORDER_LOOKUP_SECRET` or the docs login are

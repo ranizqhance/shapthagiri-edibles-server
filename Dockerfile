@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 ###############################################################################
-# Shapthagiri Edibles API — NestJS + Sequelize, listens on 5777
+# Shapthagiri Edibles API — NestJS + Sequelize, listens on 9165
 #
 # Chromium is installed from the distro rather than letting Puppeteer download
 # its own bundled build: the download is ~300 MB, needs network at image-build
@@ -48,7 +48,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production \
-    PORT=5777 \
+    PORT=9165 \
     PUPPETEER_SKIP_DOWNLOAD=true \
     PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
@@ -65,7 +65,7 @@ COPY package.json ./
 COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 USER node
-EXPOSE 5777
+EXPOSE 9165
 
 # Probes /live, NOT /health. /health calls queueService.getHealth() → Redis
 # ping, and the ioredis connection uses `maxRetriesPerRequest: null`, so when

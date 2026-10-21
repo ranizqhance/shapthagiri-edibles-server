@@ -3,7 +3,7 @@ import { cleanEnv, str, port, bool, num } from "envalid";
 
 export const env = cleanEnv(process.env, {
   NODE_ENV: str({ choices: ["development", "test", "production"], default: "development" }),
-  PORT: port({ default: 5777 }),
+  PORT: port({ default: 9165 }),
   API_PREFIX: str({ default: "/api/v1" }),
 
   DB_HOST: str({ default: "localhost" }),
@@ -19,7 +19,7 @@ export const env = cleanEnv(process.env, {
   JWT_ACCESS_EXPIRES: str({ default: "15m" }),
   JWT_REFRESH_EXPIRES: str({ default: "30d" }),
 
-  CORS_ORIGINS: str({ default: "http://localhost:3000" }),
+  CORS_ORIGINS: str({ default: "http://localhost:9164" }),
 
   // Where to purge the storefront's Next.js fetch cache after a product or
   // inventory write. Without it the storefront only notices a change when its
@@ -75,6 +75,10 @@ export const env = cleanEnv(process.env, {
 
   // Payments — gateway-agnostic. Defaults to a built-in "mock" gateway when no
   // key secret is configured.
+  // false = cash on delivery only. Orders and payment calls refuse online payment,
+  // so the mock gateway (used when no key secret is set) can never capture money,
+  // and the Razorpay keys are not required to boot in production.
+  ONLINE_PAYMENTS_ENABLED: bool({ default: true }),
   PAYMENT_GATEWAY: str({ default: "mock" }),
   PAYMENT_KEY_ID: str({ default: "" }),
   PAYMENT_KEY_SECRET: str({ default: "" }),
@@ -134,8 +138,13 @@ if (isProd) {
    * checked here.
    */
   const requiredInProd: Array<[string, string]> = [
-    ["PAYMENT_KEY_SECRET", "payments would accept forged signatures"],
-    ["PAYMENT_WEBHOOK_SECRET", "every gateway webhook would be rejected"],
+    // Only while online payment is on; with it off nothing reaches the gateway.
+    ...(env.ONLINE_PAYMENTS_ENABLED
+      ? ([
+          ["PAYMENT_KEY_SECRET", "payments would accept forged signatures"],
+          ["PAYMENT_WEBHOOK_SECRET", "every gateway webhook would be rejected"],
+        ] as Array<[string, string]>)
+      : []),
     ["ORDER_LOOKUP_SECRET", "guest order-tracking links would be forgeable"],
     ["DOCS_PASSWORD", "API docs would be published behind admin/admin"],
   ];

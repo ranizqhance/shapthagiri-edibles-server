@@ -45,7 +45,7 @@ function sign(payload: string, key: string): string {
  * the browser actually loads.
  */
 function webBase(): string {
-  return (env.CORS_ORIGINS.split(",")[0] || "http://localhost:3000").trim().replace(/\/$/, "");
+  return (env.CORS_ORIGINS.split(",")[0] || "http://localhost:9164").trim().replace(/\/$/, "");
 }
 
 /** Full tracking URL for a confirmation email, or null when unconfigured. */
