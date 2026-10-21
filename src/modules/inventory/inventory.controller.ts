@@ -222,7 +222,8 @@ export class InventoryController {
         shopId,
         variantId,
         type: "ADJUSTMENT",
-        quantity: Math.abs(body.quantity - prev),
+        // signed: + received, − removed (the absolute value hid which way stock moved)
+        quantity: body.quantity - prev,
         reason: body.quantity > prev ? "Manual Restock (Increase)" : "Manual Shrinkage/Correction (Decrease)",
         referenceType: "MANUAL",
         referenceId: `MANUAL_UPDATE_${Date.now()}`,
@@ -346,7 +347,7 @@ export class InventoryController {
             shopId,
             variantId,
             type: "BULK_IMPORT",
-            quantity: Math.abs(it.quantity - prev),
+            quantity: it.quantity - prev, // signed, like ADJUSTMENT
             reason: "Bulk CSV import adjustment",
             referenceType: "BULK",
             referenceId: "CSV_IMPORT",
@@ -540,15 +541,21 @@ export class InventoryController {
 
     const qty = body.quantity ?? 1;
     const dir = body.direction.toUpperCase();
-    const [row] = await this.inv.findOrCreate({ where: { shopId, variantId: variant.id }, defaults: { shopId, variantId: variant.id, quantity: 0 } as any });
-
-    if (dir === "OUT") {
-      if (row.quantity < qty) throw new OutOfStockException({ variantId: variant.id, shopId });
-      await row.decrement("quantity", { by: qty });
-    } else {
-      await row.increment("quantity", { by: qty });
-    }
-    await this.mov.create({ shopId, variantId: variant.id, type: dir === "OUT" ? "OUT" : "IN", quantity: qty, reason: "scan", createdBy: u.sub } as any);
+    // One transaction, and the movement is a SCAN with a signed quantity. The
+    // type used to be written as "IN"/"OUT", which the movement-type enum does
+    // not allow — every scan failed with a 500 after the stock had already moved.
+    const row = await this.inv.sequelize!.transaction(async (t) => {
+      const [r] = await this.inv.findOrCreate({ where: { shopId, variantId: variant.id }, defaults: { shopId, variantId: variant.id, quantity: 0 } as any, transaction: t });
+      await r.reload({ lock: t.LOCK.UPDATE, transaction: t });
+      if (dir === "OUT") {
+        if (r.quantity < qty) throw new OutOfStockException({ variantId: variant.id, shopId });
+        await r.decrement("quantity", { by: qty, transaction: t });
+      } else {
+        await r.increment("quantity", { by: qty, transaction: t });
+      }
+      await this.mov.create({ shopId, variantId: variant.id, type: "SCAN", quantity: dir === "OUT" ? -qty : qty, reason: `scan ${dir.toLowerCase()}`, createdBy: u.sub } as any, { transaction: t });
+      return r;
+    });
     await row.reload();
     this.cacheService.invalidateStorefront();
     return { variantId: variant.id, sku: variant.sku, shopId, direction: dir, quantity: row.quantity };

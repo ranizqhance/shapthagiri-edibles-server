@@ -5,7 +5,7 @@ import { Op } from "sequelize";
  * Automatically generates a valid and unique slug based on a string.
  *
  * @param modelClass The Sequelize model class (e.g., Product, Category).
- * @param text The base text to generate a slug from (e.g., 'Kadumanga (Tender Mango Pickle)').
+ * @param text The base text to generate a slug from (e.g., 'Pooram Coconut Oil (1 L Pouch)').
  * @param currentId Optional. The ID of the current instance to ignore when checking uniqueness (for updates).
  * @returns A unique slug string.
  */

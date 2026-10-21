@@ -13,7 +13,7 @@ export class RegisterDto {
   @IsString() @Length(2, 120)
   name!: string;
 
-  @ApiPropertyOptional({ example: "customer@shreshtam.in", description: "Optional — used if Firebase token has no email" })
+  @ApiPropertyOptional({ example: "customer@shapthagiri-edibles.com", description: "Optional — used if Firebase token has no email" })
   @IsOptional() @IsEmail()
   email?: string;
 }

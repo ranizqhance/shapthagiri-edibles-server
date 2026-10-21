@@ -254,7 +254,7 @@ export const SYSTEM_ROLES: SystemRoleDef[] = [
   {
     key: "shop_manager", name: "Shop Manager", description: "Manages catalog, orders, returns and fulfilment for a shop.",
     grants: {
-      dashboard: "*", products: "*", categories: ["view"], brands: ["view"], inventory: "*",
+      dashboard: "*", products: ["view", "create", "edit", "delete", "import", "export", "manageImages", "manageInventory", "manageVariants"], categories: ["view"], brands: ["view"], inventory: "*",
       orders: "*", fulfillment: "*", returns: "*", reviews: "*", support: ["view", "respond"],
       finance: ["view"], settlement: ["view"], analytics: ["view"], reports: ["view"],
     },
@@ -264,6 +264,7 @@ export const SYSTEM_ROLES: SystemRoleDef[] = [
     grants: {
       dashboard: ["view"], finance: "*", settlement: "*", taxes: "*", wallet: "*",
       orders: ["view"], reports: "*", analytics: ["view"],
+      returns: ["view", "refund"], disputes: ["view", "resolve"],
     },
   },
   {
@@ -271,12 +272,13 @@ export const SYSTEM_ROLES: SystemRoleDef[] = [
     grants: {
       dashboard: ["view"], marketing: "*", coupons: "*", giftcards: "*", loyalty: "*",
       notifications: "*", alerts: "*", analytics: ["view"], reports: ["view"],
+      customers: ["view"], products: ["view"], inventory: ["view"],
     },
   },
   {
     key: "support", name: "Support", description: "Customer support, disputes and read access to orders/returns.",
     grants: {
-      dashboard: ["view"], support: "*", disputes: ["view"], reviews: ["view", "moderate", "reply"],
+      dashboard: ["view"], support: "*", disputes: ["view", "escalate"], reviews: ["view", "moderate", "reply"],
       orders: ["view"], returns: ["view"], customers: ["view"],
     },
   },

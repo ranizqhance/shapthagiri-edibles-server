@@ -32,7 +32,7 @@ export class CheckExistsDto {
   @IsOptional() @IsEmail()
   email?: string;
 
-  @ApiPropertyOptional({ example: "+919902012150" })
+  @ApiPropertyOptional({ example: "+919446380334" })
   @IsOptional() @IsString() @Length(6, 20)
   phone?: string;
 }

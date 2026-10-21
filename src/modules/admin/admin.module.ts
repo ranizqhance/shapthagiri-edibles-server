@@ -4,7 +4,8 @@ import { InjectModel, SequelizeModule } from "@nestjs/sequelize";
 import { Op, QueryTypes } from "sequelize";
 import type { Response } from "express";
 import { AuditLog, FeatureFlag, Setting, User, UserAddress, Order, DeliveryPartner, DeliveryZone, DeliveryPartnerDocument, Shop } from "@/models";
-import { RequirePermissions } from "@/common/decorators/permissions.decorator";
+import { RequirePermissions, RequireAnyPermission } from "@/common/decorators/permissions.decorator";
+import { WILDCARD_PERMISSION } from "@/modules/rbac/rbac.catalog";
 import { Role } from "@/common/enums/role.enum";
 import { Role as RbacRoleModel } from "@/models/role.model";
 import { CurrentUser } from "@/common/decorators/current-user.decorator";
@@ -14,7 +15,7 @@ import { paginate } from "@/common/utils/crud.util";
 import { recordAudit, normalizeIp } from "@/common/utils/audit.util";
 import { hashPassword } from "@/common/utils/password.util";
 import { buildDeliveryPartnerDefaults, createPartnerDocuments } from "@/common/utils/partner.util";
-import { BadRequestException } from "@/common/errors/http";
+import { BadRequestException, NotFoundException, ForbiddenException } from "@/common/errors/http";
 import { Public } from "@/common/decorators/public.decorator";
 import { PricingService } from "@/modules/orders/pricing.service";
 
@@ -29,9 +30,19 @@ const ENUM_ROLE_VALUES = new Set<string>(Object.values(Role));
  */
 const enumBucketFor = (roleKey: string): Role =>
   (ENUM_ROLE_VALUES.has(roleKey) ? (roleKey as Role) : Role.SUPPORT);
-import { AdminCreateUserDto, FeatureFlagDto, SettingUpsertDto, UpdateRoleDto } from "@/common/dto/common.dto";
+import { AdminCreateUserDto, FeatureFlagDto, SettingUpsertDto, UpdateRoleDto, UpdateUserStatusDto } from "@/common/dto/common.dto";
 import { EventEmitter2 } from "@nestjs/event-emitter";
 import { NotificationEventType } from "@/common/enums/notification-event.enum";
+
+/** Staff a dispute can be assigned to (mirrors the disputes service). */
+const DISPUTE_STAFF: Role[] = [Role.ADMIN, Role.SUPPORT, Role.FINANCE, Role.OPERATIONS];
+
+/** Who may read/write which settings without the full settings permission. */
+const SETTING_SLICES: { match: (key: string) => boolean; read: string[]; write?: string }[] = [
+  { match: (k) => k.startsWith("loyalty."), read: ["loyalty.view"], write: "loyalty.configure" },
+  { match: (k) => k.startsWith("delivery.") || k.startsWith("shipping.") || k === "fulfillment.useDeliveryPartners", read: ["deliveryEngine.view"], write: "deliveryEngine.configure" },
+  { match: (k) => ["platform.commission.rate", "gateway.fee.rate", "tax.rate", "currency"].includes(k), read: ["finance.view", "wallet.view"] },
+];
 
 @ApiTags("Admin")
 @ApiBearerAuth()
@@ -65,12 +76,28 @@ export class AdminController {
     return shopId;
   }
 
-  @Get("users") async users(@Query() opts: PageOptionsDto, @Query("role") role?: string, @Query("roleId") roleId?: string) {
+  /**
+   * Admin Users needs users.view. Two other screens list people too: Customers
+   * (customers.view — support, marketing pickers) sees customers only, and the
+   * dispute assignee dropdown (disputes.view — support, operations, finance)
+   * sees staff only. They used to 403 for every role but admin.
+   */
+  @RequirePermissions()
+  @RequireAnyPermission("users.view", "customers.view", "disputes.view")
+  @Get("users") async users(@CurrentUser() u: JwtPayload, @Query() opts: PageOptionsDto, @Query("role") role?: string, @Query("roleId") roleId?: string) {
     const where: any = {};
     // Prefer filtering by RBAC roleId (the Admin Users UI now filters on real roles,
     // incl. custom ones). `role` (legacy enum) kept for backward compatibility.
     if (roleId) where.roleId = roleId;
     else if (role) where.role = role;
+    const held = new Set(u?.permissions ?? []);
+    if (!held.has(WILDCARD_PERMISSION) && !held.has("users.view")) {
+      if (held.has("customers.view") && (!role || role === Role.CUSTOMER) && !roleId) where.role = Role.CUSTOMER;
+      else if (held.has("disputes.view") && role !== Role.CUSTOMER) {
+        delete where.roleId;
+        where.role = role && DISPUTE_STAFF.includes(role as Role) ? role : DISPUTE_STAFF;
+      } else throw new ForbiddenException("AUTH_FORBIDDEN");
+    }
     if (opts.q) {
       where[Op.or] = [
         { name: { [Op.iLike]: `%${opts.q}%` } },
@@ -84,7 +111,7 @@ export class AdminController {
        * every address and every complete order row — address snapshots,
        * totals, payment status — for up to 100 users in a single page.
        */
-      { model: UserAddress, as: "addresses", attributes: ["id", "label", "city", "state", "postalCode", "isDefault"] },
+      { model: UserAddress, as: "addresses", attributes: ["id", "label", "city", "state", "pincode", "isDefault"] },
       { model: Order, as: "orders", attributes: ["id", "orderNumber", "status", "total", "createdAt"] },
       // The assigned RBAC role — Admin Users displays this name, so a rename is
       // reflected everywhere immediately (single source of truth).
@@ -218,6 +245,28 @@ export class AdminController {
     return { blocked: true };
   }
 
+  /**
+   * Block or unblock from the Users screen's toggle. Blocking also bumps the
+   * token version, so the account's open sessions end at their next request
+   * instead of running on until their access token expires.
+   */
+  @RequirePermissions('users.deactivate')
+  @Patch("users/:id/status") async setStatus(@CurrentUser() actor: JwtPayload, @Ip() ip: string, @Param("id") id: string, @Body() b: UpdateUserStatusDto) {
+    if (id === actor?.sub && !b.isActive) throw new BadRequestException("BAD_REQUEST", "You cannot block your own account.");
+    const before = await this.user.findByPk(id);
+    if (!before) throw new NotFoundException("NOT_FOUND", "User not found");
+    const wasActive = before.isActive;
+    await before.update(b.isActive ? { isActive: true } : { isActive: false, tokenVersion: (before.tokenVersion ?? 0) + 1 } as any);
+    await recordAudit(this.audit, {
+      actorId: actor?.sub, action: b.isActive ? "user_unblocked" : "user_blocked", entity: "User", entityId: id,
+      before: { isActive: wasActive }, after: { isActive: b.isActive }, ip: normalizeIp(ip),
+    });
+    if (!b.isActive) {
+      this.eventEmitter.emit("admin.notify", { eventType: NotificationEventType.USER_BLOCKED, variables: { userId: id } });
+    }
+    return { id, isActive: b.isActive };
+  }
+
   @RequirePermissions('users.deactivate')
   @Delete("users/:id") async deleteUser(@CurrentUser() actor: JwtPayload, @Ip() ip: string, @Param("id") id: string) {
     const before = await this.user.findByPk(id);
@@ -246,10 +295,28 @@ export class AdminController {
     });
     return flag;
   }
-  @RequirePermissions('settings.view')
-  @Get("settings") settings() { return this.setting.findAll(); }
-  @RequirePermissions('settings.edit')
+  /**
+   * Settings are read by more than the Settings page: Loyalty (marketing), the
+   * Delivery engine (operations) and the Platform wallet's fee rates (finance)
+   * each need their own slice. settings.view still sees everything; the others
+   * see — and, with their configure permission, edit — only their own keys.
+   */
+  @RequirePermissions()
+  @RequireAnyPermission("settings.view", "loyalty.view", "deliveryEngine.view", "finance.view", "wallet.view")
+  @Get("settings") async settings(@CurrentUser() u: JwtPayload) {
+    const rows = await this.setting.findAll();
+    const held = new Set(u?.permissions ?? []);
+    if (held.has(WILDCARD_PERMISSION) || held.has("settings.view")) return rows;
+    return rows.filter((r) => SETTING_SLICES.some((sl) => sl.read.some((p) => held.has(p)) && sl.match(r.key)));
+  }
+  @RequirePermissions()
+  @RequireAnyPermission("settings.edit", "loyalty.configure", "deliveryEngine.configure")
   @Put("settings/:key") async setKey(@CurrentUser() u: JwtPayload, @Ip() ip: string, @Param("key") key: string, @Body() b: SettingUpsertDto) {
+    const held = new Set(u?.permissions ?? []);
+    if (!held.has(WILDCARD_PERMISSION) && !held.has("settings.edit")
+        && !SETTING_SLICES.some((sl) => sl.write && held.has(sl.write) && sl.match(key))) {
+      throw new ForbiddenException("AUTH_FORBIDDEN", "You can't change this setting.");
+    }
     const before = await this.setting.findOne({ where: { key } });
     await this.setting.upsert({ key, value: b.value, scope: b.scope ?? null } as any);
     // Pricing caches settings for 30s; drop it so an edit here is visible on
@@ -391,7 +458,7 @@ export class AdminController {
  * except…" rule leaks each one the day it is added. Anything not named here
  * simply does not exist as far as this endpoint is concerned.
  */
-const PUBLIC_SETTING_KEYS = ["business.whatsappNumber", "business.name", "business.phone"] as const;
+const PUBLIC_SETTING_KEYS = ["business.whatsappNumber", "business.name", "business.legalName", "business.phone", "business.landline", "business.supportEmail"] as const;
 
 @ApiTags("Settings")
 @Controller("settings")
@@ -399,9 +466,8 @@ export class PublicSettingsController {
   constructor(@InjectModel(Setting) private setting: typeof Setting) {}
 
   /**
-   * Cash-on-delivery hands the order to WhatsApp instead of creating one, so
-   * the checkout — including for a signed-out visitor — has to know which
-   * number to open. That is the reason this exists.
+   * The business's public contact details — name, phones, WhatsApp, support
+   * email — for the storefront's contact links, readable signed out.
    */
   @Public()
   @Get("public")

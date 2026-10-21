@@ -93,9 +93,17 @@ export class PromotionsService implements OnModuleInit, OnModuleDestroy {
     return userCart && userCart.items ? userCart.items : [];
   }
 
+  /** A percentage above 100 would discount past zero; a negative value would add to the bill. */
+  private assertCouponValue(type: string | undefined, value: number | undefined) {
+    if (value == null || type === "free_delivery") return;
+    if (Number(value) < 0) throw new BadRequestException("Discount value cannot be negative");
+    if (type === "pct" && Number(value) > 100) throw new BadRequestException("A percentage discount cannot exceed 100%");
+  }
+
   async createCoupon(data: CouponDto, actorId: string) {
     // Normalize the code so lowercase can never be persisted via any client/API.
     if (data.code) (data as any).code = data.code.trim().toUpperCase();
+    this.assertCouponValue(data.type, data.value);
 
     const active = this.resolveIsActive(data.status);
     if (active !== undefined) (data as any).isActive = active;
@@ -123,6 +131,7 @@ export class PromotionsService implements OnModuleInit, OnModuleDestroy {
 
     const coupon = await this.coupon.findByPk(id);
     if (!coupon) throw new NotFoundException("Coupon not found");
+    this.assertCouponValue(data.type ?? coupon.type, data.value ?? (data.type ? Number(coupon.value) : undefined));
     const before = coupon.toJSON();
 
     const active = this.resolveIsActive(data.status);

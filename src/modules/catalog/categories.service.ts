@@ -109,8 +109,8 @@ export class CategoriesService {
          )`
       : "";
     // Count only products DIRECTLY assigned to this category — a product listed
-    // under a sub-category such as "Mango Pickles" must not also inflate the count
-    // of its parent ("Pickles"). No subtree/descendant rollup.
+    // under a sub-category such as "Roasted Coconut Oil" must not also inflate the count
+    // of its parent ("Coconut Oil"). No subtree/descendant rollup.
     return this.sequelize.literal(`(
       SELECT CAST(COUNT(p.id) AS INTEGER)
       FROM products p

@@ -90,6 +90,7 @@ export const SELF_SERVICE_ROUTES: ReadonlySet<string> = new Set([
   "POST /partners/assignments/:id/pickup",
   "POST /partners/me/online",
   "POST /partners/me/ping",
+  "POST /payments/cod/confirm/:orderId",
   "GET /payments/invoices/:orderId",
   "GET /payments/invoices/:orderId/pdf",
   "GET /payments/me",

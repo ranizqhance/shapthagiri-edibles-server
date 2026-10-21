@@ -2,7 +2,8 @@ import { Injectable, Logger } from "@nestjs/common";
 import { ConflictException, ForbiddenException, NotFoundException, UnauthorizedException, BadRequestException } from "@/common/errors/http";
 import { InjectModel } from "@nestjs/sequelize";
 import { EventEmitter2, OnEvent } from "@nestjs/event-emitter";
-import { IdempotencyKey, Invoice, Order, Payment, PaymentRefund, EarningWallet, LedgerEntry, OrderShipment, AuditLog, User, Return, OrderItem, Cart } from "@/models";
+import { IdempotencyKey, Invoice, Order, Payment, PaymentRefund, EarningWallet, LedgerEntry, OrderShipment, AuditLog, User, Return, OrderItem, Cart, DeliveryPartner } from "@/models";
+import { WILDCARD_PERMISSION } from "@/modules/rbac/rbac.catalog";
 import { Cron, CronExpression } from "@nestjs/schedule";
 import { Op } from "sequelize";
 import { Role } from "@/common/enums/role.enum";
@@ -34,6 +35,7 @@ export class PaymentsService {
     @InjectModel(AuditLog) private auditLogModel: typeof AuditLog,
     @InjectModel(User) private userModel: typeof User,
     @InjectModel(Cart) private cart: typeof Cart,
+    @InjectModel(DeliveryPartner) private partnerModel: typeof DeliveryPartner,
     private notifications: NotificationsService,
     private lockService: RedisLockService,
     private ordersService: OrdersService,
@@ -108,8 +110,13 @@ export class PaymentsService {
       if (!order) throw new NotFoundException("NOT_FOUND", "Order not found");
       if (order.userId !== u.sub && u.role !== Role.ADMIN) throw new ForbiddenException("AUTH_FORBIDDEN");
       
-      if (![OrderStatus.PAYMENT_PENDING, OrderStatus.FAILED].includes(order.status as any)) {
-        throw new ConflictException("CONFLICT", `Cannot retry payment for order in ${order.status} status`);
+      // Only an order still waiting for payment. An expired (failed) order has
+      // already released its stock, coupon and stored value — taking money for it
+      // now would charge for goods that are back on the shelf.
+      if (order.status !== OrderStatus.PAYMENT_PENDING) {
+        throw new ConflictException("CONFLICT", order.status === OrderStatus.FAILED
+          ? "This order expired before it was paid. Please place it again."
+          : `Cannot retry payment for order in ${order.status} status`);
       }
 
       // Re-create payment intent — for the remaining payable only, never the gross total.
@@ -276,18 +283,62 @@ export class PaymentsService {
     // This logic has been moved to FinanceService listening to RefundCompleted events.
   }
 
-  async confirmCod(id: string) {
+  /**
+   * Record the cash for a cash-on-delivery order. Idempotent: a second click
+   * answers `alreadyCollected` instead of writing a second payment. Records
+   * what the customer actually owed in cash — the order total less any gift
+   * card or wallet applied at checkout.
+   *
+   * Open to finance (finance.manageWallet), to the fulfilling shop's staff
+   * (orders.edit on a shipment of their shop) and to the delivery partner
+   * carrying one of its shipments — the person actually handed the cash.
+   */
+  async confirmCod(id: string, actor: JwtPayload) {
     const order = await this.order.findByPk(id);
     if (!order) throw new NotFoundException("NOT_FOUND", "Order not found");
+    await this.assertCanCollectCash(order.id, actor);
+    if (order.paymentMethod !== PaymentMethod.COD) {
+      throw new ConflictException(undefined, "Only cash-on-delivery orders are confirmed here.");
+    }
+    if (order.paymentStatus === PaymentStatus.CAPTURED) return { collected: true, alreadyCollected: true };
+    if (order.status === OrderStatus.CANCELLED || order.status === OrderStatus.FAILED) {
+      throw new ConflictException(undefined, "This order was cancelled — there is no cash to collect.");
+    }
     await this.pay.create({
       orderId: id,
       method: "cod",
       gateway: "cod",
-      amount: Number(order.total),
+      amount: Number(order.payableAmount ?? order.total),
       status: "captured",
     } as any);
     await order.update({ paymentStatus: PaymentStatus.CAPTURED });
-    return { collected: true };
+    // Coupon redemption, loyalty points and invoice record — what an online
+    // capture gets. A failure here must not undo the cash that was collected.
+    await this.ordersService.bookCodCollection(order.id).catch((e) =>
+      this.logger.error(`COD book-keeping failed for order ${order.id}: ${e?.message}`),
+    );
+    await this.auditLogModel.create({
+      actorId: actor.sub,
+      action: "cod_collected",
+      entity: "Order",
+      entityId: order.id,
+      before: { paymentStatus: PaymentStatus.PENDING },
+      after: { paymentStatus: PaymentStatus.CAPTURED, amount: Number(order.payableAmount ?? order.total) },
+    } as any);
+    return { collected: true, alreadyCollected: false };
+  }
+
+  private async assertCanCollectCash(orderId: string, u: JwtPayload) {
+    const held = new Set(u.permissions ?? []);
+    if (held.has(WILDCARD_PERMISSION) || held.has("finance.manageWallet")) return;
+
+    const ships = await this.ship.findAll({ where: { orderId }, attributes: ["shopId", "deliveryPartnerId"] });
+    if (held.has("orders.edit") && u.shopId && ships.some((s) => s.shopId === u.shopId)) return;
+    if (u.role === Role.DELIVERY_PARTNER) {
+      const partner = await this.partnerModel.findOne({ where: { userId: u.sub }, attributes: ["id"] });
+      if (partner && ships.some((s) => s.deliveryPartnerId === partner.id)) return;
+    }
+    throw new ForbiddenException("AUTH_FORBIDDEN");
   }
 
   async cancelPayment(paymentId: string, u: JwtPayload) {

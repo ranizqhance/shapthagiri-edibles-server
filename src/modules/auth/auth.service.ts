@@ -10,6 +10,8 @@ import { BadRequestException } from "@/common/errors/http";
 import { smsProvider } from "@/common/providers/sms.provider";
 import { emailProvider } from "@/common/providers/email.provider";
 import { env } from "@/config/env";
+import { BRAND } from "@/common/brand";
+import { brandedEmail, escapeHtml } from "@/common/utils/branded-email.util";
 import { RegisterDto } from "./dto/register.dto";
 import { LoginDto } from "./dto/login.dto";
 import { NotificationQueueService } from "../notifications/notification.queue";
@@ -313,7 +315,7 @@ export class AuthService {
 
       // Email failures must not leak (or 500) — log and still return generic.
       try {
-        await emailProvider.send(user.email, "Reset your Shreshtam password", this.resetEmailHtml(user.name, resetUrl));
+        await emailProvider.send(user.email, `Reset your ${BRAND.name} password`, this.resetEmailHtml(user.name, resetUrl));
       } catch (e) {
         this.logger.error("Password reset email failed to send", e as Error);
       }
@@ -346,37 +348,16 @@ export class AuthService {
     return { reset: true, message: "Your password has been reset. You can now sign in." };
   }
 
-  /**
-   * Shared Shreshtam frame for transactional auth emails: maroon wordmark header
-   * with the "The Taste of Valluvanad" tagline and a contact footer. Inline styles only
-   * (email clients strip <style>).
-   */
-  private brandedEmail(inner: string): string {
-    return `
-      <div style="background:#FBF6EE;padding:24px 12px;font-family:Arial,sans-serif">
-        <div style="max-width:520px;margin:0 auto;background:#fff;border:1px solid #EADFCC;border-radius:14px;overflow:hidden;color:#2B1D17">
-          <div style="background:#871604;padding:16px 24px;border-bottom:3px solid #C8A165">
-            <div style="color:#fff;font-size:20px;font-weight:700;letter-spacing:3px;font-family:Georgia,'Times New Roman',serif">SHRESHTAM</div>
-            <div style="color:#F49C44;font-size:12px;font-style:italic;margin-top:2px">The Taste of Valluvanad</div>
-          </div>
-          <div style="padding:24px">${inner}</div>
-          <div style="background:#FBF6EE;border-top:1px solid #EADFCC;padding:12px 24px;font-size:11px;color:#6E5C50;text-align:center">
-            Shreshtam &middot; Cherukara, Malappuram, Kerala 679340<br/>shreshtamgroup@gmail.com &middot; +91 99020 12150
-          </div>
-        </div>
-      </div>`;
-  }
-
   private resetEmailHtml(name: string, resetUrl: string): string {
-    return this.brandedEmail(`
-        <h2 style="color:#6C1203;margin:0 0 12px">Reset your password</h2>
-        <p>Hi ${name || "there"},</p>
-        <p>We received a request to reset your Shreshtam password. Click the button below to choose a new one. This link expires in 30 minutes and can be used once.</p>
+    return brandedEmail(`
+        <h2 style="color:${BRAND.primaryDark};margin:0 0 12px">Reset your password</h2>
+        <p>Hi ${escapeHtml(name || "there")},</p>
+        <p>We received a request to reset your ${BRAND.name} password. Click the button below to choose a new one. This link expires in 30 minutes and can be used once.</p>
         <p style="text-align:center;margin:28px 0">
-          <a href="${resetUrl}" style="background:#871604;color:#fff;text-decoration:none;padding:12px 28px;border-radius:9999px;font-weight:600;display:inline-block">Reset password</a>
+          <a href="${resetUrl}" style="background:${BRAND.primary};color:#fff;text-decoration:none;padding:12px 28px;border-radius:9999px;font-weight:600;display:inline-block">Reset password</a>
         </p>
-        <p style="font-size:12px;color:#6E5C50">If the button doesn't work, copy this link into your browser:<br/><a href="${resetUrl}" style="color:#871604;word-break:break-all">${resetUrl}</a></p>
-        <p style="font-size:12px;color:#6E5C50">If you didn't request this, you can safely ignore this email — your password won't change.</p>`);
+        <p style="font-size:12px;color:${BRAND.muted}">If the button doesn't work, copy this link into your browser:<br/><a href="${resetUrl}" style="color:${BRAND.primary};word-break:break-all">${resetUrl}</a></p>
+        <p style="font-size:12px;color:${BRAND.muted}">If you didn't request this, you can safely ignore this email — your password won't change.</p>`);
   }
 
   // ─────────────────────── Registration Email OTP ───────────────────────
@@ -437,7 +418,7 @@ export class AuthService {
 
   private async mailOtp(emailKey: string, code: string, name?: string) {
     try {
-      await emailProvider.send(emailKey, "Your Shreshtam verification code", this.otpEmailHtml(name || "there", code));
+      await emailProvider.send(emailKey, `Your ${BRAND.name} verification code`, this.otpEmailHtml(name || "there", code));
     } catch (e) {
       this.logger.error("OTP email failed to send", e as Error);
       throw new BadRequestException("INTERNAL_ERROR", "We couldn't send the verification email. Please try again.");
@@ -540,14 +521,14 @@ export class AuthService {
   }
 
   private otpEmailHtml(name: string, code: string): string {
-    return this.brandedEmail(`
-        <h2 style="color:#6C1203;margin:0 0 12px">Verify your email</h2>
-        <p>Hi ${name},</p>
-        <p>Use the code below to finish creating your Shreshtam account. It expires in 10 minutes.</p>
+    return brandedEmail(`
+        <h2 style="color:${BRAND.primaryDark};margin:0 0 12px">Verify your email</h2>
+        <p>Hi ${escapeHtml(name)},</p>
+        <p>Use the code below to finish creating your ${BRAND.name} account. It expires in 10 minutes.</p>
         <p style="text-align:center;margin:28px 0">
-          <span style="display:inline-block;background:#FBF6EE;border:1px solid #C8A165;border-radius:12px;padding:14px 28px;font-size:30px;letter-spacing:8px;font-weight:700;color:#871604">${code}</span>
+          <span style="display:inline-block;background:${BRAND.surface};border:1px solid ${BRAND.amber};border-radius:12px;padding:14px 28px;font-size:30px;letter-spacing:8px;font-weight:700;color:${BRAND.primary}">${code}</span>
         </p>
-        <p style="font-size:12px;color:#6E5C50">If you didn't request this, you can safely ignore this email.</p>`);
+        <p style="font-size:12px;color:${BRAND.muted}">If you didn't request this, you can safely ignore this email.</p>`);
   }
 
   private async issueTokens(user: User, meta?: { ip?: string; device?: string }) {
@@ -577,13 +558,15 @@ export class AuthService {
       this.logger.error(`Could not record session for user ${user.id}: ${(e as Error).message}`);
     }
 
+    // The same role id and permission keys /auth/me returns, so the dashboard
+    // can draw its menu from the sign-in response instead of waiting on a
+    // follow-up request. UI only — every route re-checks on the server.
+    const { roleId, permissions } = await this.rbac.getPermissionsForUser(user);
+
     return {
       accessToken: signAccess(payload),
       refreshToken,
-      // phoneVerified travels with the session: the storefront decides whether
-      // to offer cash on delivery from it, and must not have to wait for a
-      // follow-up /auth/me to know.
-      user: { id: user.id, name: user.name, email: user.email, phone: user.phone, role: user.role, avatarUrl: user.avatarUrl, shopId: user.shopId, phoneVerified: user.phoneVerified, emailVerified: user.emailVerified },
+      user: { id: user.id, name: user.name, email: user.email, phone: user.phone, role: user.role, avatarUrl: user.avatarUrl, shopId: user.shopId, phoneVerified: user.phoneVerified, emailVerified: user.emailVerified, roleId, permissions },
     };
   }
 }

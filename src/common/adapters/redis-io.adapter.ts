@@ -23,6 +23,14 @@ import { REDIS_OPTIONS } from "@/common/services/kv";
  * still starts and real-time still works *within* one instance, which is the
  * correct trade for a shop that would otherwise be entirely down.
  */
+function waitUntilReady(client: Redis): Promise<void> {
+  if (client.status === "ready") return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Redis connection timed out")), REDIS_OPTIONS.connectTimeout + 1000);
+    client.once("ready", () => { clearTimeout(timer); resolve(); });
+  });
+}
+
 export class RedisIoAdapter extends IoAdapter {
   private readonly logger = new Logger("RedisIoAdapter");
   private adapterConstructor?: ReturnType<typeof createAdapter>;
@@ -52,6 +60,11 @@ export class RedisIoAdapter extends IoAdapter {
     subClient.on("error", (e) => this.logger.warn(`sub: ${e.message}`));
 
     try {
+      // The shared options disable the offline queue, so a command sent before
+      // the socket is up fails at once ("Stream isn't writeable") — which made
+      // this check fail on every boot even with Redis running. Wait for both
+      // connections first, bounded by the connect timeout.
+      await Promise.all([pubClient, subClient].map(waitUntilReady));
       await Promise.all([pubClient.ping(), subClient.ping()]);
       this.adapterConstructor = createAdapter(pubClient, subClient);
       this.logger.log(`Socket.IO clustered via Redis at ${env.REDIS_HOST}:${env.REDIS_PORT}`);

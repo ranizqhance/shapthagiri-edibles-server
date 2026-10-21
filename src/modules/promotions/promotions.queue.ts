@@ -92,7 +92,8 @@ export class CouponSchedulerQueue implements OnModuleInit, OnModuleDestroy {
     for (const c of toActivate) {
       await c.update({ status: "active", isActive: true });
       await this.audit.create({
-        actorId: "system", action: "ACTIVATE", entity: "Coupon", entityId: c.id,
+        // actorId is a UUID column: the old "system" string failed the insert and the whole sweep.
+        actorId: null, action: "ACTIVATE", entity: "Coupon", entityId: c.id,
       } as any);
       
       this.eventEmitter.emit("admin.notify", {
@@ -114,7 +115,8 @@ export class CouponSchedulerQueue implements OnModuleInit, OnModuleDestroy {
     for (const c of toExpire) {
       await c.update({ status: "expired", isActive: false });
       await this.audit.create({
-        actorId: "system", action: "EXPIRE", entity: "Coupon", entityId: c.id,
+        // actorId is a UUID column: the old "system" string failed the insert and the whole sweep.
+        actorId: null, action: "EXPIRE", entity: "Coupon", entityId: c.id,
       } as any);
       
       this.eventEmitter.emit("admin.notify", {

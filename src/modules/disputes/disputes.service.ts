@@ -16,7 +16,8 @@ import { paginate } from "@/common/utils/crud.util";
 /** Dispute lifecycle. Terminal = resolved | rejected. */
 export const DISPUTE_STATUSES = ["open", "under_review", "awaiting_customer", "escalated", "resolved", "rejected"] as const;
 const TERMINAL = ["resolved", "rejected"];
-const STAFF = [Role.ADMIN, Role.SUPPORT, Role.FINANCE];
+// Operations holds disputes.* in RBAC; leaving it out here blocked its whole Disputes page.
+const STAFF = [Role.ADMIN, Role.SUPPORT, Role.FINANCE, Role.OPERATIONS];
 /** SLA target hours by priority. */
 const SLA_HOURS: Record<string, number> = { urgent: 4, high: 12, medium: 24, low: 48 };
 /** Monetary resolutions above this, and all gateway/gift-card payouts, need ADMIN/FINANCE. */
@@ -232,7 +233,7 @@ export class DisputesService {
       const d = await this.load(id, t);
       this.assertTransition(d, ["open", "under_review", "awaiting_customer", "escalated"]);
       const agent = await this.users.findByPk(agentId, { transaction: t });
-      if (!agent || !STAFF.includes(agent.role as Role)) throw new BadRequestException("BAD_REQUEST", "Assignee must be a support/admin/finance user.");
+      if (!agent || !STAFF.includes(agent.role as Role)) throw new BadRequestException("BAD_REQUEST", "Assignee must be an admin, support, finance or operations user.");
       await d.update({ assignedTo: agentId, status: d.status === "open" ? "under_review" : d.status }, { transaction: t });
       await this.audit(user.sub, "Dispute Assigned", id, { assignedTo: agentId }, t);
       t.afterCommit(async () => {

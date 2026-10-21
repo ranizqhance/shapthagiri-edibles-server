@@ -1,23 +1,11 @@
 /**
  * Presentation helpers for scheduled finance reports: email validation, CSV export,
  * and the branded email body + printable (PDF) HTML. No hardcoded business
- * data — every value is passed in by the caller from the live report.
+ * data — every value is passed in by the caller from the live report; the
+ * brand itself comes from common/brand.ts.
  */
 
-/** Shreshtam palette (maroon + mango/gold on warm cream). */
-const BRAND = {
-  name: "Shreshtam",
-  wordmark: "SHRESHTAM",
-  tagline: "The Taste of Valluvanad",
-  primary: "#871604",
-  primaryDark: "#6C1203",
-  accent: "#F49C44",
-  gold: "#C8A165",
-  surface: "#FBF6EE",
-  ink: "#2B1D17",
-  muted: "#6E5C50",
-  border: "#EADFCC",
-};
+import { BRAND } from "../brand";
 
 export interface ReportSummaryItem { label: string; value: string }
 export interface ReportTable { columns: string[]; rows: (string | number)[][] }
@@ -119,9 +107,9 @@ export function brandedReportEmail(opts: {
 
   return `<!doctype html><html><body style="margin:0;background:${BRAND.surface};padding:24px;font-family:Arial,Helvetica,sans-serif">
     <div style="max-width:640px;margin:0 auto;background:#fff;border:1px solid ${BRAND.border};border-radius:16px;overflow:hidden">
-      <div style="background:${BRAND.primary};padding:18px 24px;border-bottom:3px solid ${BRAND.gold}">
+      <div style="background:${BRAND.primary};padding:18px 24px;border-bottom:3px solid ${BRAND.amber}">
         <div style="color:#fff;font-size:20px;font-weight:700;letter-spacing:3px;font-family:Georgia,'Times New Roman',serif">${BRAND.wordmark}</div>
-        <div style="color:${BRAND.accent};font-size:12px;font-style:italic;letter-spacing:.5px;margin-top:2px">${BRAND.tagline}</div>
+        <div style="color:${BRAND.onPrimary};font-size:12px;font-style:italic;letter-spacing:.5px;margin-top:2px">${BRAND.tagline}</div>
       </div>
       <div style="padding:24px">
         <h1 style="margin:0 0 4px;font-size:20px;color:${BRAND.primaryDark}">${escapeHtml(opts.title)}</h1>
@@ -131,7 +119,7 @@ export function brandedReportEmail(opts: {
         <p style="margin:20px 0 0;color:${BRAND.muted};font-size:12px">${escapeHtml(opts.attachmentsNote ?? "The full report is attached.")}</p>
       </div>
       <div style="background:${BRAND.surface};padding:14px 24px;color:${BRAND.muted};font-size:11px;text-align:center">
-        This is an automated financial report from ${BRAND.name} &mdash; ${BRAND.tagline}. Do not reply to this email.
+        This is an automated financial report from ${BRAND.legalName} &mdash; ${BRAND.tagline}. Do not reply to this email.
       </div>
     </div>
   </body></html>`;
@@ -161,7 +149,7 @@ export function printableReportHtml(opts: {
     body{font-family:Arial,Helvetica,sans-serif;color:${BRAND.ink};padding:32px}
     .head{border-bottom:3px solid ${BRAND.primary};padding-bottom:16px;margin-bottom:20px}
     .brand{color:${BRAND.primary};font-size:22px;font-weight:700;letter-spacing:3px;font-family:Georgia,'Times New Roman',serif}
-    .tagline{color:${BRAND.gold};font-size:12px;font-style:italic;margin:2px 0 0}
+    .tagline{color:${BRAND.primary};font-size:12px;font-style:italic;margin:2px 0 0}
     h2{margin:8px 0 2px;font-size:18px;color:${BRAND.primaryDark}}
     .muted{color:${BRAND.muted};font-size:12px;margin:0}
     table{width:100%;border-collapse:collapse;margin-top:8px}

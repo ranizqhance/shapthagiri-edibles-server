@@ -616,9 +616,13 @@ export class GiftCardService {
   }
 
   // Called when an order is cancelled or payment fails (inside a transaction)
-  async refundBalance(giftCardId: string, amount: number, orderId: string, actorId: string, reason: string, t: Transaction): Promise<void> {
+  async refundBalance(giftCardId: string, amount: number, orderId: string, actorId: string | null, reason: string, t: Transaction): Promise<void> {
     const giftCard = await this.giftCardModel.findByPk(giftCardId, { lock: t.LOCK.UPDATE, transaction: t });
     if (!giftCard) return;
+    // One refund per order: a cancellation followed by the expiry sweep (or a
+    // retried request) must not put the balance back twice.
+    const already = await this.transactionModel.findOne({ where: { giftCardId, orderId, type: "refund" }, transaction: t });
+    if (already) return;
 
     const newBalance = Number(giftCard.balance) + Number(amount);
 

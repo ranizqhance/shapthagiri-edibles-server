@@ -1,6 +1,7 @@
 import nodemailer, { Transporter } from "nodemailer";
 import { env } from "@/config/env";
 import { logger } from "@/common/utils/logger";
+import { BRAND } from "@/common/brand";
 import { EmailProviderException } from "@/common/errors/integration";
 
 export class EmailProvider {
@@ -69,7 +70,7 @@ export class EmailProvider {
 
   // Gmail requires the From address to be the authenticated account.
   private fromAddress(): string {
-    if (env.GMAIL_USER && env.GMAIL_APP_PASSWORD) return `Shreshtam <${env.GMAIL_USER}>`;
+    if (env.GMAIL_USER && env.GMAIL_APP_PASSWORD) return `${BRAND.name} <${env.GMAIL_USER}>`;
     return env.MAIL_FROM;
   }
 

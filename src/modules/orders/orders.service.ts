@@ -2,7 +2,7 @@ import { Injectable, BadRequestException, Inject, forwardRef, Logger } from "@ne
 import { InjectModel, InjectConnection } from "@nestjs/sequelize";
 import { Sequelize } from "sequelize-typescript";
 import { Op } from "sequelize";
-import { Cart, CartItem, IdempotencyKey, Invoice, Order, OrderItem, OrderShipment, OrderStatusHistory, ProductVariant, RoutingDecision, ShopInventory, StockMovement, AuditLog, CouponRedemption, DeliveryAssignment, Payment, PaymentRefund, DeliveryPartner, Product, ProductMedia, User, GiftCard, PromotionRedemption } from "@/models";
+import { Cart, CartItem, IdempotencyKey, Invoice, Order, OrderItem, OrderShipment, OrderStatusHistory, ProductVariant, RoutingDecision, ShopInventory, StockMovement, AuditLog, CouponRedemption, DeliveryAssignment, Payment, PaymentRefund, DeliveryPartner, Product, ProductMedia, User, GiftCard, PromotionRedemption, Setting } from "@/models";
 import { OrderStatus, PaymentMethod, PaymentStatus } from "@/common/enums/order-status.enum";
 import { CartEmptyException, CancellationWindowExpiredException, OrderAlreadyCancelledException, OutOfStockException } from "@/common/errors/domain";
 import { NotFoundException, ConflictException, ForbiddenException, BadRequestException as AppBadRequestException } from "@/common/errors/http";
@@ -32,6 +32,10 @@ import { EventEmitter2 } from "@nestjs/event-emitter";
 import { env } from "@/config/env";
 import { Cron, CronExpression } from "@nestjs/schedule";
 import { htmlToPdf } from "@/common/utils/pdf.util";
+import { BRAND } from "@/common/brand";
+
+/** Shipment states in which the customer already has the goods. */
+const DELIVERED_STATES: OrderStatus[] = [OrderStatus.DELIVERED, OrderStatus.COMPLETED, OrderStatus.RETURN_REQUESTED, OrderStatus.RETURN_APPROVED, OrderStatus.RETURNED, OrderStatus.REFUND_PENDING, OrderStatus.REFUNDED];
 
 @Injectable()
 export class OrdersService {
@@ -71,6 +75,7 @@ export class OrdersService {
     public eventEmitter: EventEmitter2,
     private readonly loyaltyService: LoyaltyService,
     private readonly wallet: WalletService,
+    @InjectModel(Setting) private settingModel: typeof Setting,
   ) {}
 
   /**
@@ -80,29 +85,10 @@ export class OrdersService {
    * decrement, which makes overselling impossible under concurrency.
    */
   async create(userId: string, input: any, idemKey?: string | null) {
-    // Cash on delivery does not create an order. The storefront builds a
-    // WhatsApp message instead and the shop works it by hand, so nothing is
-    // written here — no order, no shipment, no stock movement.
-    //
-    // Refused server-side rather than only in the UI: a stale client, a
-    // replayed request or a direct API call would otherwise still put a COD
-    // order in the dashboard, which is exactly what this change removes.
-    //
-    // Outside withIdempotency deliberately. That helper does a findOrCreate on
-    // the key before running the body, so a guard inside it would still leave
-    // an idempotency_keys row behind for an order the owner wants to write
-    // nothing at all. Out here a refused COD touches no table.
-    //
-    // Only new orders are refused. Existing COD rows keep working, and the
-    // exchange path writes its replacement order straight through the model
-    // (returns/exchange-fulfillment.service.ts), so it is unaffected.
-    if (input.paymentMethod === PaymentMethod.COD) {
-      throw new AppBadRequestException(
-        "COD_VIA_WHATSAPP",
-        "Cash on delivery orders are placed over WhatsApp, not here.",
-      );
-    }
-
+    // Cash on delivery places a real order: status PLACED, payment PENDING, no
+    // gateway leg and no payment-hold expiry (expireUnpaidOrders only sweeps
+    // PAYMENT_PENDING). Staff record the cash with POST payments/cod/confirm/:id
+    // once the parcel is paid for.
     return withIdempotency(this.idem, { key: idemKey, endpoint: "orders.create", payload: { userId, ...input } }, () =>
       this.sequelize.transaction(async (t) => {
         let cart: Cart | null = null;
@@ -636,6 +622,9 @@ export class OrdersService {
               orderNumber: order.orderNumber,
               shopName: shopNames,
               trackUrl,
+              // The buyer's copy is worded as a confirmation, not a work order.
+              audience: "customer",
+              amount: Number(order.payableAmount ?? order.total),
             });
             
             const managers = await this.userModel.findAll({ where: { role: Role.SHOP_MANAGER, shopId: { [Op.in]: Array.from(shopIds) } } });
@@ -741,7 +730,7 @@ export class OrdersService {
    * order expires, so a customer never loses balance for an order that never
    * completed. Both underlying calls write their own ledger entries.
    */
-  private async restoreStoredValue(order: Order, actorId: string, reason: string, t: Transaction) {
+  private async restoreStoredValue(order: Order, actorId: string | null, reason: string, t: Transaction) {
     if (order.giftCardId && Number(order.giftCardDiscount) > 0) {
       await this.giftCards.refundBalance(
         order.giftCardId, Number(order.giftCardDiscount), order.id, actorId, reason, t,
@@ -782,7 +771,13 @@ export class OrdersService {
           // Re-check under the lock — it may have been paid or cancelled meanwhile.
           if (!order || order.status !== OrderStatus.PAYMENT_PENDING || order.paymentStatus !== PaymentStatus.PENDING) return;
 
-          await this.restoreStoredValue(order, order.userId, "Payment not completed — order expired", t);
+          // The full cancellation path: it puts the stock back, releases the
+          // coupon and promotion usage, returns stored value and redeemed points.
+          // This used to restore only the stored value, so every abandoned online
+          // payment kept its units off the shelf for good.
+          const shipments = await this.shipment.findAll({ where: { orderId: order.id }, lock: t.LOCK.UPDATE, transaction: t });
+          const open = shipments.filter((sh) => sh.status !== OrderStatus.CANCELLED);
+          await this.executeFulfillmentCancellation(t, order, open, null, "Payment not completed — order expired");
           await order.update({ status: OrderStatus.FAILED, paymentStatus: PaymentStatus.FAILED }, { transaction: t });
           expired++;
         });
@@ -885,8 +880,13 @@ export class OrdersService {
         lock: t.LOCK.UPDATE,
         transaction: t
       });
+      // Delivered goods are a return, not a cancellation: cancelling refunded the
+      // full amount and restocked units the customer still has.
+      if (shipments.some((s) => DELIVERED_STATES.includes(s.status))) {
+        throw new ConflictException("CONFLICT", "This order has been delivered — raise a return instead of cancelling it.");
+      }
 
-      await this.executeFulfillmentCancellation(t, order, shipments, adminId || "admin", reason || "Admin force cancelled order");
+      await this.executeFulfillmentCancellation(t, order, shipments, adminId || null, reason || "Admin force cancelled order");
       return { success: true };
     });
   }
@@ -906,6 +906,9 @@ export class OrdersService {
 
       if (shipment.status === OrderStatus.CANCELLED) {
         throw new ConflictException("CONFLICT", "Shipment is already cancelled");
+      }
+      if (DELIVERED_STATES.includes(shipment.status)) {
+        throw new ConflictException("CONFLICT", "This shipment has been delivered — raise a return instead of cancelling it.");
       }
 
       const order = await this.order.findOne({
@@ -1012,7 +1015,7 @@ export class OrdersService {
     t: any,
     order: Order,
     shipmentsToCancel: OrderShipment[],
-    actorId: string,
+    actorId: string | null,
     reason?: string
   ) {
     for (const s of shipmentsToCancel) {
@@ -1107,9 +1110,12 @@ export class OrdersService {
           transaction: t
         });
         if (paymentToRefund) {
+          // The gateway refund is the cash leg only. Gift card and wallet are
+          // returned by restoreStoredValue above; refunding order.total as well
+          // paid them back twice.
           const refundObj = await this.paymentRefundModel.create({
             paymentId: paymentToRefund.id,
-            amount: order.total,
+            amount: Number(order.payableAmount ?? order.total),
             reason: reason || "Order cancelled",
             status: "pending"
           } as any, { transaction: t });
@@ -1134,7 +1140,7 @@ export class OrdersService {
       void (async () => {
       if (paymentRefundId && paymentToRefund) {
         try {
-          const res = await paymentProvider.refund(paymentToRefund.gatewayRef ?? paymentToRefund.id, Number(order.total));
+          const res = await paymentProvider.refund(paymentToRefund.gatewayRef ?? paymentToRefund.id, Number(order.payableAmount ?? order.total));
           await this.paymentRefundModel.update(
             { refundRef: res.refundRef },
             { where: { id: paymentRefundId } }
@@ -1259,6 +1265,15 @@ export class OrdersService {
       attributes: ["id", "shipmentNumber", "status", "trackingNumber", "dispatchedAt", "deliveredAt"],
       include: [{ model: OrderItem, attributes: ["productName", "quantity", "unitPrice", "price"] }],
     });
+    // Status and time only — the notes are staff-facing. Order-level rows
+    // ("placed", written before any shipment acts) apply to every shipment.
+    const timeline = shipments.length
+      ? await this.history.findAll({
+          where: { [Op.or]: [{ shipmentId: shipments.map((sh) => sh.id) }, { orderId: order.id, shipmentId: null }] },
+          attributes: ["id", "shipmentId", "status", "createdAt"],
+          order: [["createdAt", "ASC"]],
+        })
+      : [];
 
     return {
       orderNumber: order.orderNumber,
@@ -1279,6 +1294,9 @@ export class OrdersService {
           quantity: it.quantity,
           price: it.unitPrice ?? it.price ?? null,
         })),
+        history: timeline
+          .filter((h: any) => h.shipmentId === sh.id || h.shipmentId == null)
+          .map((h: any) => ({ id: h.id, shipmentId: sh.id, status: h.status, createdAt: h.createdAt })),
       })),
     };
   }
@@ -1324,7 +1342,10 @@ export class OrdersService {
     const ships = await this.shipment.findAll({ where: { orderId } });
     const items = await this.orderItem.findAll({ where: { shipmentId: ships.map((s) => s.id) } });
 
-    const html = this.buildInvoiceHtml(order, inv.number, items);
+    // Registration numbers print only once the business has entered them.
+    const regs = await this.settingModel.findAll({ where: { key: ["business.gst", "business.fssai"] } });
+    const reg = (key: string) => String(regs.find((r) => r.key === key)?.value ?? "").trim();
+    const html = this.buildInvoiceHtml(order, inv.number, items, { gstin: reg("business.gst"), fssai: reg("business.fssai") });
 
     // Lazy-load puppeteer (ESM-only, heavy) so it is only resolved when an invoice
     // is actually generated — keeps app/context boot fast and CJS-loader friendly.
@@ -1405,7 +1426,7 @@ export class OrdersService {
     return this.esc(url);
   };
 
-  private buildInvoiceHtml(order: Order, number: string, items: OrderItem[]): string {
+  private buildInvoiceHtml(order: Order, number: string, items: OrderItem[], seller: { gstin: string; fssai: string }): string {
     const esc = this.esc;
     const safeImg = this.safeImg;
     const address = order.addressSnapshot as any || {};
@@ -1455,19 +1476,19 @@ export class OrdersService {
 
         return `
         <tr>
-          <td style="padding: 12px; border-bottom: 1px solid #EADFCC;">
+          <td style="padding: 12px; border-bottom: 1px solid ${BRAND.border};">
             <div style="display: flex; gap: 12px; align-items: center;">
-              ${safeImg(i.productImage) ? `<img src="${safeImg(i.productImage)}" style="width: 48px; height: 48px; object-fit: contain; border-radius: 8px; border: 1px solid #EADFCC; background: #FBF6EE;" />` : ''}
+              ${safeImg(i.productImage) ? `<img src="${safeImg(i.productImage)}" style="width: 48px; height: 48px; object-fit: contain; border-radius: 8px; border: 1px solid ${BRAND.border}; background: ${BRAND.surface};" />` : ''}
               <div>
-                <div style="font-weight: 600; color: #2B1D17; font-size: 14px;">${title}${freeBadge}</div>
-                ${attrs ? `<div style="font-size: 12px; color: #6E5C50; margin-top: 2px;">${attrs}</div>` : ''}
-                <div style="font-size: 11px; color: #6E5C50; font-family: monospace; margin-top: 4px;">SKU: ${sku}</div>
+                <div style="font-weight: 600; color: ${BRAND.ink}; font-size: 14px;">${title}${freeBadge}</div>
+                ${attrs ? `<div style="font-size: 12px; color: ${BRAND.muted}; margin-top: 2px;">${attrs}</div>` : ''}
+                <div style="font-size: 11px; color: ${BRAND.muted}; font-family: monospace; margin-top: 4px;">SKU: ${sku}</div>
               </div>
             </div>
           </td>
-          <td style="padding: 12px; border-bottom: 1px solid #EADFCC; text-align: center; color: #6E5C50; font-size: 14px;">${i.quantity}</td>
-          <td style="padding: 12px; border-bottom: 1px solid #EADFCC; text-align: right; color: #6E5C50; font-size: 14px;">${unitCell}</td>
-          <td style="padding: 12px; border-bottom: 1px solid #EADFCC; text-align: right; font-weight: 600; color: #2B1D17; font-size: 14px;">${totalCell}</td>
+          <td style="padding: 12px; border-bottom: 1px solid ${BRAND.border}; text-align: center; color: ${BRAND.muted}; font-size: 14px;">${i.quantity}</td>
+          <td style="padding: 12px; border-bottom: 1px solid ${BRAND.border}; text-align: right; color: ${BRAND.muted}; font-size: 14px;">${unitCell}</td>
+          <td style="padding: 12px; border-bottom: 1px solid ${BRAND.border}; text-align: right; font-weight: 600; color: ${BRAND.ink}; font-size: 14px;">${totalCell}</td>
         </tr>`;
       })
       .join("");
@@ -1478,33 +1499,35 @@ export class OrdersService {
 <meta charset="utf-8">
 <title>${number}</title>
 <style>
-  body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #2B1D17; margin: 0; padding: 40px; }
-  .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 40px; padding-bottom: 24px; border-bottom: 3px solid #871604; }
-  .brand h1 { color: #871604; margin: 0; font-size: 28px; letter-spacing: 3px; text-transform: uppercase; font-family: Georgia, 'Times New Roman', serif; }
-  .brand .tagline { margin: 0 0 8px 0; color: #C8A165; font-size: 13px; font-style: italic; }
-  .brand p { margin: 0; color: #6E5C50; font-size: 13px; line-height: 1.5; }
+  body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: ${BRAND.ink}; margin: 0; padding: 40px; }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 40px; padding-bottom: 24px; border-bottom: 3px solid ${BRAND.primary}; }
+  .brand h1 { color: ${BRAND.primary}; margin: 0; font-size: 24px; letter-spacing: 2px; text-transform: uppercase; font-family: Georgia, 'Times New Roman', serif; }
+  .brand .tagline { margin: 0 0 8px 0; color: ${BRAND.muted}; font-size: 13px; font-style: italic; }
+  .brand p { margin: 0; color: ${BRAND.muted}; font-size: 13px; line-height: 1.5; }
   .invoice-meta { text-align: right; }
-  .invoice-meta h2 { color: #871604; margin: 0 0 8px 0; font-size: 24px; text-transform: uppercase; letter-spacing: 1px; }
-  .invoice-meta p { margin: 2px 0; font-size: 13px; color: #6E5C50; }
+  .invoice-meta h2 { color: ${BRAND.primary}; margin: 0 0 8px 0; font-size: 24px; text-transform: uppercase; letter-spacing: 1px; }
+  .invoice-meta p { margin: 2px 0; font-size: 13px; color: ${BRAND.muted}; }
   .info-blocks { display: flex; gap: 40px; margin-bottom: 40px; }
-  .info-block { flex: 1; background: #FBF6EE; padding: 20px; border-radius: 12px; border: 1px solid #EADFCC; }
-  .info-block h3 { margin: 0 0 12px 0; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: #6E5C50; }
-  .info-block strong { color: #2B1D17; font-size: 15px; display: block; margin-bottom: 4px; }
-  .info-block p { margin: 2px 0; font-size: 13px; color: #6E5C50; line-height: 1.5; }
+  .info-block { flex: 1; background: ${BRAND.surface}; padding: 20px; border-radius: 12px; border: 1px solid ${BRAND.border}; }
+  .info-block h3 { margin: 0 0 12px 0; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: ${BRAND.muted}; }
+  .info-block strong { color: ${BRAND.ink}; font-size: 15px; display: block; margin-bottom: 4px; }
+  .info-block p { margin: 2px 0; font-size: 13px; color: ${BRAND.muted}; line-height: 1.5; }
   table { width: 100%; border-collapse: collapse; margin-bottom: 32px; }
-  th { text-align: left; padding: 12px; background: #FBF6EE; color: #6C1203; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 2px solid #EADFCC; }
+  th { text-align: left; padding: 12px; background: ${BRAND.surface}; color: ${BRAND.primaryDark}; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 2px solid ${BRAND.border}; }
   .summary { width: 320px; margin-left: auto; }
-  .summary-row { display: flex; justify-content: space-between; padding: 8px 0; font-size: 14px; color: #6E5C50; }
-  .summary-row.total { border-top: 2px solid #C8A165; padding-top: 12px; margin-top: 4px; font-weight: 700; font-size: 18px; color: #6C1203; }
-  .footer { margin-top: 64px; padding-top: 24px; border-top: 1px solid #EADFCC; text-align: center; color: #6E5C50; font-size: 12px; }
+  .summary-row { display: flex; justify-content: space-between; padding: 8px 0; font-size: 14px; color: ${BRAND.muted}; }
+  .summary-row.total { border-top: 2px solid ${BRAND.amber}; padding-top: 12px; margin-top: 4px; font-weight: 700; font-size: 18px; color: ${BRAND.primaryDark}; }
+  .footer { margin-top: 64px; padding-top: 24px; border-top: 1px solid ${BRAND.border}; text-align: center; color: ${BRAND.muted}; font-size: 12px; }
 </style>
 </head>
 <body>
   <div class="header">
     <div class="brand">
-      <h1>Shreshtam</h1>
-      <p class="tagline">The Taste of Valluvanad</p>
-      <p>16/257A, Pulinkav, Cherukara PO, Malappuram Dist, Kerala 679340<br>shreshtamgroup@gmail.com | +91 99020 12150</p>
+      <h1>${BRAND.legalName}</h1>
+      <p class="tagline">${BRAND.name} &middot; ${BRAND.tagline}</p>
+      <p>${BRAND.addressLine}<br>${BRAND.email} | ${BRAND.phone}</p>
+      ${seller.gstin ? `<p>GSTIN: ${esc(seller.gstin)}</p>` : ""}
+      ${seller.fssai ? `<p>FSSAI Lic. No: ${esc(seller.fssai)}</p>` : ""}
     </div>
     <div class="invoice-meta">
       <h2>INVOICE</h2>
@@ -1552,17 +1575,17 @@ export class OrdersService {
     ${Number(order.tax) > 0 ? `<div class="summary-row"><span>Tax</span><span>₹${Number(order.tax).toFixed(2)}</span></div>` : ""}
     <div class="summary-row"><span>Delivery</span><span>₹${Number(order.deliveryFee).toFixed(2)}</span></div>
     <div class="summary-row total"><span>${storedValueUsed > 0 ? 'Order Total' : 'Grand Total'}</span><span>₹${Number(order.total).toFixed(2)}</span></div>
-    ${gcUsed > 0 ? `<div class="summary-row" style="color: #F49C44; font-weight: 600; padding-top: 8px;"><span>Gift Card Used ${order.giftCard ? `(***${esc(order.giftCard.code.slice(-4))})` : ''}</span><span>-₹${gcUsed.toFixed(2)}</span></div>` : ''}
-    ${walletUsed > 0 ? `<div class="summary-row" style="color: #F49C44; font-weight: 600; padding-top: 8px;"><span>Wallet Used</span><span>-₹${walletUsed.toFixed(2)}</span></div>` : ''}
-    ${storedValueUsed > 0 ? `<div class="summary-row total" style="margin-top: 8px; border-top: 1px solid #EADFCC; padding-top: 8px;"><span>Amount Paid</span><span style="color: #10b981;">₹${amountPaid.toFixed(2)}</span></div>` : ''}
-    <div style="margin-top: 16px; font-size: 12px; color: #6E5C50; text-align: right;">
+    ${gcUsed > 0 ? `<div class="summary-row" style="color: ${BRAND.primary}; font-weight: 600; padding-top: 8px;"><span>Gift Card Used ${order.giftCard ? `(***${esc(order.giftCard.code.slice(-4))})` : ''}</span><span>-₹${gcUsed.toFixed(2)}</span></div>` : ''}
+    ${walletUsed > 0 ? `<div class="summary-row" style="color: ${BRAND.primary}; font-weight: 600; padding-top: 8px;"><span>Wallet Used</span><span>-₹${walletUsed.toFixed(2)}</span></div>` : ''}
+    ${storedValueUsed > 0 ? `<div class="summary-row total" style="margin-top: 8px; border-top: 1px solid ${BRAND.border}; padding-top: 8px;"><span>Amount Paid</span><span style="color: #10b981;">₹${amountPaid.toFixed(2)}</span></div>` : ''}
+    <div style="margin-top: 16px; font-size: 12px; color: ${BRAND.muted}; text-align: right;">
       Payment: <strong style="text-transform: uppercase;">${esc(paidWith)}</strong> (${esc(order.paymentStatus)})
     </div>
   </div>
 
   <div class="footer">
-    <p>Thank you for shopping with Shreshtam — The Taste of Valluvanad.</p>
-    <p style="margin-top: 4px;">For any queries, contact shreshtamgroup@gmail.com or call +91 99020 12150.</p>
+    <p>Thank you for shopping with ${BRAND.name}.</p>
+    <p style="margin-top: 4px;">For any queries, contact ${BRAND.email} or call ${BRAND.phone}.</p>
   </div>
 </body>
 </html>`;
@@ -1595,23 +1618,44 @@ export class OrdersService {
    * Orchestrates post‑payment business logic after PAYMENT_CAPTURED event.
    * Assumes payment and order status have already been updated by verification flow.
    */
+  /**
+   * Book-keeping once an order's money is in: the coupon redemption becomes
+   * final, loyalty points are earned and the invoice record exists. Each step is
+   * idempotent. Runs for online captures and — from PaymentsService.confirmCod —
+   * when cash on delivery is collected; COD orders used to get none of the three.
+   */
+  async bookPaidOrder(order: Order, t: Transaction) {
+    if (order.couponCode) await this.promotions.finalizeRedemption(order.id, t);
+    await this.loyaltyService.earnPoints(order.userId, order.id, order.total, t);
+    await this.invoiceModel.findOrCreate({
+      where: { orderId: order.id },
+      defaults: { orderId: order.id, number: `INV-${order.orderNumber.replace(/[^A-Za-z0-9]/g, '')}`, issuedAt: new Date(), url: null } as any,
+      transaction: t,
+    });
+  }
+
+  /** Same book-keeping for a cash-on-delivery order, in its own transaction. */
+  async bookCodCollection(orderId: string) {
+    return this.sequelize.transaction(async (t) => {
+      const order = await this.order.findByPk(orderId, { lock: t.LOCK.UPDATE, transaction: t });
+      if (order) await this.bookPaidOrder(order, t);
+    });
+  }
+
   async handleSuccessfulPayment(orderId: string) {
     this.logger.log(`Handling successful payment for order ${orderId}`);
     return this.sequelize.transaction(async (t) => {
-      const order = await this.order.findByPk(orderId, { transaction: t });
+      // Row lock first: the verify call and the queued capture can both deliver
+      // PAYMENT_CAPTURED for one order at the same moment, and without it the two
+      // transactions deadlocked creating the invoice.
+      const order = await this.order.findByPk(orderId, { lock: t.LOCK.UPDATE, transaction: t });
       if (!order) throw new NotFoundException('NOT_FOUND', 'Order not found');
-      // Coupon redemption
-      if (order.couponCode) {
-        await this.promotions.finalizeRedemption(order.id, t);
-      }
-      // Loyalty points (single engine: idempotent, lifetime-based, non-demoting)
-      await this.loyaltyService.earnPoints(order.userId, order.id, order.total, t);
-      // Invoice DB record (without PDF generation)
-      await this.invoiceModel.findOrCreate({
-        where: { orderId: order.id },
-        defaults: { orderId: order.id, number: `INV-${order.orderNumber.replace(/[^A-Za-z0-9]/g, '')}`, issuedAt: new Date(), url: null } as any,
-        transaction: t,
-      });
+      await this.bookPaidOrder(order, t);
+
+      // A repeat capture event stops here — the order already left PAYMENT_PENDING
+      // and its timeline row was written the first time.
+      const stillPending = await this.shipment.count({ where: { orderId: order.id, status: OrderStatus.PAYMENT_PENDING }, transaction: t });
+      if (!stillPending) return;
 
       // Update shipment statuses to PAYMENT_SUCCESS to move them out of PAYMENT_PENDING
       await this.shipment.update({ status: OrderStatus.PAYMENT_SUCCESS }, { where: { orderId: order.id }, transaction: t });
@@ -1776,7 +1820,9 @@ export class OrdersService {
           transaction: t,
         });
 
-        await this.executeFulfillmentCancellation(t, order, shipments, "system", "Payment hold timeout expired");
+        // actorId null: "system" is not a UUID and used to fail the whole transaction.
+        await this.executeFulfillmentCancellation(t, order, shipments, null, "Payment hold timeout expired");
+        await order.update({ status: OrderStatus.FAILED, paymentStatus: PaymentStatus.FAILED }, { transaction: t });
       });
     }
 }

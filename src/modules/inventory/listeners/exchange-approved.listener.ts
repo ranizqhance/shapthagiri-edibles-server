@@ -6,6 +6,9 @@ import { ExchangeApprovedEvent } from '@/common/events/exchange-approved.event';
 import { InventoryReservation, ShopInventory, StockMovement, Exchange, Return } from '@/models';
 import { NotificationsService } from '@/modules/notifications/notifications.service';
 
+/** How long replacement stock stays held for an approved exchange. */
+const EXCHANGE_HOLD_DAYS = 10;
+
 @Injectable()
 export class ExchangeApprovedListener {
   private readonly logger = new Logger(ExchangeApprovedListener.name);
@@ -49,8 +52,11 @@ export class ExchangeApprovedListener {
 
       // 2. Idempotency Check using the database partial unique index constraint.
       // We will attempt to insert the reservation, and if it fails due to the unique constraint, it means this event was already processed.
-      const expiresAt = new Date();
-      expiresAt.setHours(expiresAt.getHours() + 48); // 48-hour reservation limit
+      // The replacement is only created once the returned item has been picked
+      // up and passed inspection — typically 3–6 days after approval. The old
+      // 48-hour hold expired first, so exchanges failed with "reservation expired"
+      // and no replacement order was ever made.
+      const expiresAt = new Date(Date.now() + EXCHANGE_HOLD_DAYS * 24 * 3600_000);
 
       const [reservation, created] = await InventoryReservation.findOrCreate({
         where: {

@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 ###############################################################################
-# Shreshtam API — NestJS + Sequelize, listens on 5777
+# Shapthagiri Edibles API — NestJS + Sequelize, listens on 5777
 #
 # Chromium is installed from the distro rather than letting Puppeteer download
 # its own bundled build: the download is ~300 MB, needs network at image-build
@@ -78,7 +78,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
   CMD sh -c '[ "${DEBUG_HOLD:-0}" = "1" ] || curl -fsS "http://127.0.0.1:${PORT}/api/v1/live"'
 
 # Runs the API directly rather than via `npm run start:prod`, which shells out
-# to kill-port (a devDependency) against a hardcoded port 4000.
+# to kill-port (a devDependency) against a hardcoded port.
 # Set DEBUG_HOLD=1 in the environment to keep the container up after a boot
 # failure so the crash can be read with `docker exec`.
 CMD ["docker-entrypoint.sh"]

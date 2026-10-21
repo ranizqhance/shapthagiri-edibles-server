@@ -270,7 +270,19 @@ export class PromotionsController {
   @RequirePermissions('marketing.view') @Get("campaigns") camps(@Query() opts: PageOptionsDto) { return paginate(this.camp, opts); }
   @RequirePermissions('marketing.create') @Post("campaigns") createCamp(@Body() b: CampaignDto) { return this.camp.create(b as any); }
   @RequirePermissions('marketing.edit') @Post("campaigns/:id/launch") async launch(@Param("id") id: string) {
-    await this.camp.update({ status: "live", scheduledAt: new Date() }, { where: { id } }); return { launched: true };
+    const [n] = await this.camp.update({ status: "live", scheduledAt: new Date() }, { where: { id } });
+    if (!n) throw new NotFoundException("NOT_FOUND", "Campaign not found");
+    return { launched: true };
+  }
+  @RequirePermissions('marketing.edit') @Post("campaigns/:id/pause") async pauseCampaign(@Param("id") id: string) {
+    const [n] = await this.camp.update({ status: "paused" }, { where: { id } });
+    if (!n) throw new NotFoundException("NOT_FOUND", "Campaign not found");
+    return { paused: true };
+  }
+  @RequirePermissions('marketing.delete') @Delete("campaigns/:id") async deleteCampaign(@Param("id") id: string) {
+    const n = await this.camp.destroy({ where: { id } });
+    if (!n) throw new NotFoundException("NOT_FOUND", "Campaign not found");
+    return { deleted: true };
   }
 
   /* ── Deals of the Day (admin CRUD, managed from the Marketing module) ── */

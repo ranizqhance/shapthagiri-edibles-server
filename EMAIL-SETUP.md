@@ -1,7 +1,7 @@
-# Email configuration — Shreshtam API
+# Email configuration — Shapthagiri Edibles API
 
-Lives here rather than in a `.env.example`: `.gitignore` excludes `.env*`,
-so a dotfile example would never actually reach the repository.
+The full list of variables is in `.env.example`; this page explains the
+email ones.
 
 Copy the block you need into the service's environment. These are read at
 RUNTIME, not baked in at build time, so changing them needs a restart of the
@@ -26,7 +26,7 @@ To check a running deployment without placing an order, call
 `POST /api/v1/notifications/test-email` as an admin. `configured: false` in
 the response means no credentials are loaded.
 
-## Option A: Gmail with an app password (what production uses today)
+## Option A: Gmail with an app password (simplest to start with)
 
 Needs 2-Step Verification on the Google account, then an app password from
 https://myaccount.google.com/apppasswords — a normal account password will
@@ -55,7 +55,7 @@ MAIL_PORT=587
 MAIL_SECURE=false
 MAIL_USER=
 MAIL_PASS=
-MAIL_FROM=Shreshtam <shreshtamgroup@gmail.com>
+MAIL_FROM=Shapthagiri Edibles <shapthagirirefineries@gmail.com>
 
 ```
 

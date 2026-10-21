@@ -12,6 +12,8 @@ import type { Request, Response, NextFunction } from "express";
 import { Sequelize } from "sequelize-typescript";
 import { AppModule } from "./app.module";
 import { env, isProd } from "./config/env";
+import { BRAND } from "./common/brand";
+import { expandCorsOrigins } from "./common/utils/cors-origins.util";
 import { getFirebase } from "./config/firebase";
 import { ZoneCacheService } from "./modules/delivery-engine/zone-cache.service";
 import { RedisIoAdapter } from "./common/adapters/redis-io.adapter";
@@ -72,24 +74,7 @@ function installCrashGuards() {
  * failure on the storefront with no trace at this end.
  */
 function buildCorsOriginCheck(configured: string) {
-  const allowed = new Set<string>();
-  for (const raw of configured.split(",")) {
-    const origin = raw.trim().replace(/\/$/, "");
-    if (!origin) continue;
-    allowed.add(origin);
-    // https://example.com <-> https://www.example.com. Skipped for localhost
-    // and bare IPs, which have no www form.
-    let host: string;
-    try { host = new URL(origin).hostname; } catch { continue; }
-    const isRealDomain = host.includes(".") && !/^\d+(\.\d+)*$/.test(host);
-    if (isRealDomain) {
-      allowed.add(
-        host.startsWith("www.")
-          ? origin.replace("://www.", "://")
-          : origin.replace("://", "://www."),
-      );
-    }
-  }
+  const allowed = new Set(expandCorsOrigins(configured));
 
   const rejected = new Set<string>();
   const log = new Logger("Cors");
@@ -195,19 +180,19 @@ async function bootstrap() {
       safeEqual(user ?? "", env.DOCS_USER) && safeEqual(pass ?? "", env.DOCS_PASSWORD);
     if (ok) return next();
 
-    res.set("WWW-Authenticate", 'Basic realm="Shreshtam operator"').status(401).send("Authentication required");
+    res.set("WWW-Authenticate", `Basic realm="${BRAND.name} operator"`).status(401).send("Authentication required");
   });
 
   // Swagger
   const docConfig = new DocumentBuilder()
-    .setTitle("Shreshtam API")
-    .setDescription("Shreshtam e-commerce backend — traditional Kerala pickles, powders and kondattam (The Taste of Valluvanad). Unified DataResponseDto / ErrorResponseDto envelopes on every endpoint.")
+    .setTitle(`${BRAND.name} API`)
+    .setDescription(`${BRAND.name} e-commerce backend — ${BRAND.brands.join(" and ")} coconut oils from ${BRAND.legalName}, Palakkad (${BRAND.tagline}). Unified DataResponseDto / ErrorResponseDto envelopes on every endpoint.`)
     .setVersion("1.0.0")
     .addBearerAuth({ type: "http", scheme: "bearer", bearerFormat: "JWT", in: "header" })
     .addServer(`http://localhost:${env.PORT}`)
     .build();
   const document = SwaggerModule.createDocument(app, docConfig);
-  SwaggerModule.setup("api/docs", app, document, { customSiteTitle: "Shreshtam API Docs" });
+  SwaggerModule.setup("api/docs", app, document, { customSiteTitle: `${BRAND.name} API Docs` });
 
   getFirebase();
 
@@ -287,7 +272,7 @@ async function bootstrap() {
 
   await app.listen(env.PORT);
   const log = new Logger("Bootstrap");
-  log.log(`🚀 Shreshtam API listening on http://localhost:${env.PORT}${env.API_PREFIX}`);
+  log.log(`🚀 ${BRAND.name} API listening on http://localhost:${env.PORT}${env.API_PREFIX}`);
   log.log(`📚 Swagger UI  → http://localhost:${env.PORT}/api/docs`);
 }
 

@@ -1,0 +1,14 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "overused-font",
+        "value": "arial",
+        "createdAt": "2026-10-19T10:39:08.438Z",
+        "reason": "Claude triage: HTML email frame (branded-email.util.ts) must use a web-safe system font stack; email clients do not load web fonts reliably"
+      }
+    ]
+  }
+}

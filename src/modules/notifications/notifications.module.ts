@@ -18,6 +18,7 @@ import { Op } from "sequelize";
 import { BadRequestException, NotFoundException } from "@/common/errors/http";
 import { emailProvider } from "@/common/providers/email.provider";
 import { isDeliverableEmail } from "@/common/utils/email.util";
+import { BRAND } from "@/common/brand";
 import { OrdersModule } from "../orders/orders.module";
 import { PaymentsModule } from "../payments/payments.module";
 import { TrackingModule } from "../tracking/tracking.gateway";
@@ -107,9 +108,9 @@ export class NotificationsController {
     const sentAt = new Date().toISOString();
     const result = await emailProvider.sendMail({
       to: me.email,
-      subject: "Shreshtam — email delivery test",
-      html: `<p>Email delivery is working.</p><p>Sent ${sentAt} from the Shreshtam API.</p>`,
-      text: `Email delivery is working. Sent ${sentAt} from the Shreshtam API.`,
+      subject: `${BRAND.name} — email delivery test`,
+      html: `<p>Email delivery is working.</p><p>Sent ${sentAt} from the ${BRAND.name} API.</p>`,
+      text: `Email delivery is working. Sent ${sentAt} from the ${BRAND.name} API.`,
     });
 
     // `stub: true` is the answer that matters: it means no credentials are

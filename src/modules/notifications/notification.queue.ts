@@ -436,6 +436,12 @@ export class NotificationQueueService implements OnModuleInit, OnModuleDestroy {
         // One channel failing must not deny the others. `sendPush` throws
         // "No Push Tokens" for any customer who has never granted permission,
         // which previously failed the whole job and took the email with it.
+        // No registered device means there is nothing to deliver to, not a failure:
+        // retrying cannot conjure a token, and a push-only job used to land in the DLQ.
+        if ((e as Error).message === "No Push Tokens") {
+          attempted[attempted.length - 1] = `${name}:skipped-no-token`;
+          return;
+        }
         failures.push({ channel: name, error: (e as Error).message });
       }
     };

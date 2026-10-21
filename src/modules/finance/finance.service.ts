@@ -59,12 +59,17 @@ export class FinanceService {
     const actualDeduction = amount - commissionReversal - gatewayReversal - taxReversal;
     let deduct = actualDeduction;
 
+    // Take from available, then pending. Anything left over (a refund after the money was
+    // paid out) leaves available negative: the shop owes it back and the next settlement nets it.
+    // Clamping at zero here made the wallet drift above the ledger.
     if (currentAvailable >= deduct) {
       currentAvailable -= deduct;
     } else {
-      deduct -= currentAvailable;
-      currentAvailable = 0;
-      currentPending = Math.max(currentPending - deduct, 0);
+      deduct -= Math.max(currentAvailable, 0);
+      currentAvailable = Math.min(currentAvailable, 0);
+      const fromPending = Math.min(Math.max(currentPending, 0), deduct);
+      currentPending -= fromPending;
+      currentAvailable -= deduct - fromPending;
     }
 
     await wallet.update({ availableEarnings: currentAvailable, pendingEarnings: currentPending });

@@ -18,10 +18,13 @@ export class DealsService {
     @InjectModel(Product) private product: typeof Product,
   ) {}
 
+  /** Highest priority first unless the caller picks a sort — the order deals win ties in. */
   list(opts: PageOptionsDto) {
-    return paginate(this.deal, opts, {}, [
-      { model: Product, attributes: ["id", "title", "subtitle"] },
-    ]);
+    return paginate(
+      this.deal, opts, {},
+      [{ model: Product, attributes: ["id", "title", "subtitle"] }],
+      opts.sortBy ? {} : { order: [["priority", "DESC"], ["createdAt", "DESC"]] },
+    );
   }
 
   private validate(dto: Partial<DealDto>) {

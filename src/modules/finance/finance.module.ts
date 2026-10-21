@@ -14,7 +14,7 @@ import { FinanceReportService } from "./finance-report.service";
 import { ScheduledReportCron } from "./scheduled-report.cron";
 import { EmailDeliveryService } from "./email-delivery.service";
 import { normalizeRecipients, cronFromSchedule } from "@/common/utils/report-format.util";
-import { OrderStatus } from "../../common/enums/order-status.enum";
+import { OrderStatus, PaymentStatus } from "../../common/enums/order-status.enum";
 import { RequirePermissions } from "@/common/decorators/permissions.decorator";
 import { Role } from "@/common/enums/role.enum";
 import { CurrentUser } from "@/common/decorators/current-user.decorator";
@@ -630,29 +630,29 @@ export class FinanceController {
       <html>
         <head>
           <style>
-            body { font-family: sans-serif; padding: 40px; color: #2B1D17; }
-            .header { border-bottom: 3px solid #871604; padding-bottom: 20px; margin-bottom: 30px; }
-            .brand { color: #871604; font-size: 20px; font-weight: bold; letter-spacing: 3px; font-family: Georgia, 'Times New Roman', serif; }
-            .tagline { color: #C8A165; font-size: 12px; font-style: italic; margin-bottom: 12px; }
-            .title { font-size: 24px; font-weight: bold; color: #6C1203; }
+            body { font-family: sans-serif; padding: 40px; color: ${BRAND.ink}; }
+            .header { border-bottom: 3px solid ${BRAND.primary}; padding-bottom: 20px; margin-bottom: 30px; }
+            .brand { color: ${BRAND.primary}; font-size: 20px; font-weight: bold; letter-spacing: 3px; font-family: Georgia, 'Times New Roman', serif; }
+            .tagline { color: ${BRAND.muted}; font-size: 12px; font-style: italic; margin-bottom: 12px; }
+            .title { font-size: 24px; font-weight: bold; color: ${BRAND.primaryDark}; }
             .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 30px; }
             .table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-            .th, .td { border: 1px solid #EADFCC; padding: 12px; text-align: left; }
-            .th { background-color: #FBF6EE; color: #6C1203; font-weight: bold; }
-            .total-row { font-weight: bold; background-color: #FBF6EE; }
+            .th, .td { border: 1px solid ${BRAND.border}; padding: 12px; text-align: left; }
+            .th { background-color: ${BRAND.surface}; color: ${BRAND.primaryDark}; font-weight: bold; }
+            .total-row { font-weight: bold; background-color: ${BRAND.surface}; }
           </style>
         </head>
         <body>
           <div class="header">
-            <div class="brand">SHRESHTAM</div>
-            <div class="tagline">The Taste of Valluvanad</div>
+            <div class="brand">${BRAND.wordmark}</div>
+            <div class="tagline">${BRAND.legalName} &middot; ${BRAND.tagline}</div>
             <div class="title">Settlement Statement</div>
             <div>Settlement #${settlement.settlementNumber}</div>
             <div>Date: ${new Date(settlement.createdAt).toLocaleDateString()}</div>
           </div>
           <div class="grid">
             <div>
-              <strong>Shop:</strong> ${settlement.shop?.name ?? "—"}<br/>
+              <strong>Shop:</strong> ${escapeHtml(settlement.shop?.name ?? "—")}<br/>
               <strong>Shop ID:</strong> ${settlement.shopId}<br/>
               <strong>Period:</strong> ${new Date(settlement.startDate).toLocaleDateString()} to ${new Date(settlement.endDate).toLocaleDateString()}<br/>
             </div>
@@ -713,23 +713,25 @@ export class FinanceController {
   @RequirePermissions('settlement.payout')
   @Post("settlements/:id/pay")
   async paySettlement(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() body: { payoutRef: string }) {
-    const settlement = await this.settlementModel.findByPk(id);
-    if (!settlement) throw new NotFoundException("NOT_FOUND", "Settlement not found");
-    if (settlement.status === "paid") throw new BadRequestException("CONFLICT", "Settlement already paid");
-
-    const previousStatus = settlement.status;
-    await settlement.update({
-      status: "paid",
-      payoutRef: body.payoutRef,
-      paidAt: new Date()
+    // Claim the settlement under a row lock: two clicks (or a retried request)
+    // must not both see "not paid yet" and debit the shop twice.
+    const claimed = await this.sequelize.transaction(async (t) => {
+      const row = await this.settlementModel.findByPk(id, { lock: t.LOCK.UPDATE, transaction: t });
+      if (!row) throw new NotFoundException("NOT_FOUND", "Settlement not found");
+      if (row.status === "paid") throw new BadRequestException("CONFLICT", "Settlement already paid");
+      const before = row.status;
+      await row.update({ status: "paid", payoutRef: body.payoutRef, paidAt: new Date() }, { transaction: t });
+      return { row, before };
     });
+    const settlement = claimed.row;
+    const previousStatus = claimed.before;
 
     // Update EarningWallet
     const [wallet] = await this.walletModel.findOrCreate({ where: { shopId: settlement.shopId } });
     const amount = Number(settlement.netPayable);
 
     await wallet.update({
-      availableEarnings: Math.max(Number(wallet.availableEarnings) - amount, 0),
+      availableEarnings: Number(wallet.availableEarnings) - amount,
       upcomingSettlementAmount: Math.max(Number(wallet.upcomingSettlementAmount) - amount, 0),
       paidBalance: Number(wallet.paidBalance) + amount,
       lastSettlementAmount: amount,
@@ -774,6 +776,10 @@ export class FinanceController {
   async scheduleSettlement(@CurrentUser() u: JwtPayload, @Param("id") id: string) {
     const settlement = await this.settlementModel.findByPk(id);
     if (!settlement) throw new NotFoundException("NOT_FOUND", "Settlement not found");
+    // Scheduling a paid settlement used to reset it to "scheduled", which then
+    // let it be paid — and the shop debited — a second time.
+    if (settlement.status === "paid") throw new BadRequestException("CONFLICT", "Settlement already paid");
+    if (settlement.status === "scheduled") return settlement;
 
     const previousStatus = settlement.status;
     await settlement.update({ status: "scheduled" });
@@ -805,12 +811,19 @@ export class FinanceController {
   @Post("settlements/generate-eligible")
   async generateEligibleSettlements(@CurrentUser() u: JwtPayload) {
     // Find all delivered/completed shipments not yet associated with a settlement
+    // Only shipments whose payment has actually been collected: a COD order the
+    // courier has not yet handed the cash in for is not earnings yet.
+    // REFUNDED shipments were delivered first; their refund is already debited from the
+    // shop in real time (FinanceService.handleRefundCompleted), so the sale still settles.
     const shipments = await this.ship.findAll({
       where: {
-        status: { [Op.in]: [OrderStatus.DELIVERED, OrderStatus.COMPLETED] as any },
+        status: { [Op.in]: [OrderStatus.DELIVERED, OrderStatus.COMPLETED, OrderStatus.REFUNDED] as any },
         settlementId: null
       },
-      include: [{ model: OrderItem, as: "items" }]
+      include: [
+        { model: OrderItem, as: "items" },
+        { model: Order, as: "order", attributes: [], required: true, where: { paymentStatus: { [Op.in]: [PaymentStatus.CAPTURED, PaymentStatus.PARTIAL_REFUNDED] } } },
+      ]
     });
 
     if (shipments.length === 0) {
@@ -896,9 +909,12 @@ export class FinanceController {
 
       // Update EarningWallet
       const [wallet] = await this.walletModel.findOrCreate({ where: { shopId }, transaction: t });
+      // Refunds may already have drawn pending below this gross; take the shortfall from
+      // available so pending + available still moves by exactly −(gross − net), like the ledger.
+      const pendingAfter = Number(wallet.pendingEarnings) - grossSales;
       await wallet.update({
-        pendingEarnings: Math.max(Number(wallet.pendingEarnings) - grossSales, 0),
-        availableEarnings: Number(wallet.availableEarnings) + netPayable,
+        pendingEarnings: Math.max(pendingAfter, 0),
+        availableEarnings: Number(wallet.availableEarnings) + netPayable + Math.min(pendingAfter, 0),
         upcomingSettlementAmount: Number(wallet.upcomingSettlementAmount) + netPayable
       }, { transaction: t });
 
@@ -998,6 +1014,8 @@ export class FinanceController {
 
 
 import { FinanceService } from "./finance.service";
+import { BRAND } from "@/common/brand";
+import { escapeHtml } from "@/common/utils/branded-email.util";
 
 @Module({
   imports: [

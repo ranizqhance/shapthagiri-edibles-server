@@ -5,6 +5,8 @@ tsconfig.tsbuildinfo
 # Secrets never belong in an image layer — inject at runtime via compose/env.
 .env
 .env.*
+!.env.example
+dokploy-*.env
 
 .git
 .gitignore

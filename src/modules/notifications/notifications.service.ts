@@ -5,6 +5,7 @@ import { Role } from "@/common/enums/role.enum";
 import { pushProvider } from "@/common/providers/push.provider";
 import { emailProvider } from "@/common/providers/email.provider";
 import { isDeliverableEmail } from "@/common/utils/email.util";
+import { brandedTextEmail } from "@/common/utils/branded-email.util";
 import { Op } from "sequelize";
 import { TrackingGateway } from "../tracking/tracking.gateway";
 import { NotificationQueueService } from "./notification.queue";
@@ -57,14 +58,20 @@ export class NotificationsService {
     }
     if (!template) {
       // Production Fallbacks
+      if (code === "NEW_ORDER" && variables.audience === "customer") {
+        return {
+          title: `Order ${variables.orderNumber || ""} placed ✅`.replace(/\s+/g, " "),
+          body:
+            `Thank you for your order${variables.orderNumber ? ` ${variables.orderNumber}` : ""}. ` +
+            (variables.amount ? `Please keep ₹${variables.amount} ready to pay in cash on delivery.` : "Pay in cash when it is delivered.") +
+            (variables.trackUrl ? ` Track it here: ${variables.trackUrl}` : ""),
+        };
+      }
       if (code === "NEW_ORDER") {
         return {
           title: "New order to fulfill 📦",
           body:
-            `Order ${variables.orderNumber || ""} has items assigned to ${variables.shopName || "your shop"}.` +
-            // Present only on the copy sent to the customer, who may have no
-            // account password and no way back to the order otherwise.
-            (variables.trackUrl ? ` Track it here: ${variables.trackUrl}` : ""),
+            `Order ${variables.orderNumber || ""} has items assigned to ${variables.shopName || "your shop"}.`,
         };
       }
       if (code === "SHIPMENT_UNASSIGNED") {
@@ -451,7 +458,7 @@ export class NotificationsService {
       this.logger.log(`Skipped email for ${userId}: no deliverable address`);
       return;
     }
-    await emailProvider.send(email, title, body);
+    await emailProvider.send(email, title, brandedTextEmail(title, body), body);
   }
 
   async sendSms(phone: string, title: string, body: string, recordId: string, userId: string) {

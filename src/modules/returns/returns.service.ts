@@ -9,6 +9,7 @@ import { Sequelize } from 'sequelize-typescript';
 import { Return, ReturnMedia, Exchange, OrderItem, User, ShopInventory, StockMovement, Order, OrderShipment, ProductVariant, Product, AuditLog, Brand, PaymentRefund, Payment, InventoryReservation, ProductMedia } from '@/models';
 import { JwtPayload } from '@/modules/auth/jwt.strategy';
 import { Role } from '@/common/enums/role.enum';
+import { OrderStatus } from '@/common/enums/order-status.enum';
 import { NotificationsService } from '@/modules/notifications/notifications.service';
 import { NotificationQueueService } from '@/modules/notifications/notification.queue';
 import { NotificationEventType } from '@/common/enums/notification-event.enum';
@@ -120,6 +121,32 @@ export class ReturnsService {
     const requested = this.round2(perUnit * Number(returnQty));
     const remaining = this.round2(Math.max(0, lineRefundable - alreadyRefunded));
     return this.round2(Math.max(0, Math.min(requested, remaining)));
+  }
+
+  /**
+   * Once every unit in a shipment has come back and been refunded, the shipment moves to
+   * REFUNDED, and the order follows when none of its shipments is still live. Partial
+   * returns leave the status alone; the per-item return shows on the order page.
+   */
+  private async markRefundedIfFullyReturned(orderItemId: string) {
+    const line = await this.orderItemModel.findByPk(orderItemId);
+    if (!line) return;
+    const shipment = await OrderShipment.findByPk(line.shipmentId);
+    if (!shipment || ![OrderStatus.DELIVERED, OrderStatus.COMPLETED].includes(shipment.status as OrderStatus)) return;
+
+    const items = await this.orderItemModel.findAll({ where: { shipmentId: shipment.id } });
+    const refunded = await this.returnModel.findAll({ where: { orderItemId: items.map((i) => i.id), status: 'refunded' } });
+    const allBack = items.every((i) => {
+      const units = refunded.filter((r) => r.orderItemId === i.id).reduce((n, r) => n + (r.quantity == null ? i.quantity : Number(r.quantity)), 0);
+      return units >= i.quantity;
+    });
+    if (!allBack) return;
+
+    await shipment.update({ status: OrderStatus.REFUNDED } as any);
+    const shipments = await OrderShipment.findAll({ where: { orderId: shipment.orderId } });
+    if (shipments.every((s) => [OrderStatus.REFUNDED, OrderStatus.CANCELLED].includes(s.status as OrderStatus))) {
+      await Order.update({ status: OrderStatus.REFUNDED } as any, { where: { id: shipment.orderId } });
+    }
   }
 
   /** Maintain the running per-line refunded total (§2/§6) — idempotent-safe caller responsibility. */
@@ -380,6 +407,24 @@ export class ReturnsService {
     return { purchased: purchasedQty, returned, remaining: Math.max(0, purchasedQty - returned) };
   }
 
+  /**
+   * A return needs a delivered item still inside the policy's window. The window
+   * was resolved but never compared, so a return 20+ days after delivery against
+   * a 7-day policy went straight through — as did a return on an undelivered item.
+   */
+  private assertWithinReturnWindow(item: OrderItem, policy: { returnWindowDays?: number | null }) {
+    const shipment: any = (item as any).shipment;
+    const delivered = shipment && ["delivered", "completed"].includes(shipment.status) && shipment.deliveredAt;
+    if (!delivered) {
+      throw new AppBadRequestException('BAD_REQUEST', `${item.productName || 'This item'} has not been delivered yet, so it cannot be returned.`);
+    }
+    const days = Number(policy.returnWindowDays ?? 7);
+    const closesAt = new Date(shipment.deliveredAt).getTime() + days * 24 * 3600_000;
+    if (Date.now() > closesAt) {
+      throw new AppBadRequestException('BAD_REQUEST', `The ${days}-day return window for ${item.productName || 'this item'} closed on ${new Date(closesAt).toLocaleDateString('en-IN')}.`);
+    }
+  }
+
   async createReturn(user: JwtPayload, data: any): Promise<Return> {
     const item = await this.orderItemModel.findByPk(data.orderItemId, {
       include: [
@@ -402,6 +447,7 @@ export class ReturnsService {
       if (!policy.isReturnable) {
         throw new BadRequestException('This product is not eligible for return.');
       }
+      this.assertWithinReturnWindow(item, policy);
     }
 
     // Quantity ceiling: default to the whole remaining eligible quantity when the
@@ -478,6 +524,7 @@ export class ReturnsService {
           if (isExchange ? !policy.isReplaceable : !policy.isReturnable) {
             throw new AppBadRequestException('BAD_REQUEST', `${item.productName || 'This product'} is not eligible for ${isExchange ? 'replacement' : 'return'}.`);
           }
+          this.assertWithinReturnWindow(item, policy);
         }
 
         const { remaining } = await this.getReturnEligibility(line.orderItemId, Number(item.quantity), t);
@@ -842,6 +889,7 @@ export class ReturnsService {
                   category: 'REFUND',
                   reason: `Refund for return ${rid}`,
                   idempotencyKey: `return-refund-${rid}`,
+                  returnId: rid, orderId,
                 });
               }
               // Finalize via the existing pipeline: sets status=refunded, claws back loyalty
@@ -910,6 +958,7 @@ export class ReturnsService {
 
     // Maintain the running per-line refunded total (§2).
     await this.bumpLineRefunded(ret.orderItemId, Number(payload.amount || 0));
+    await this.markRefundedIfFullyReturned(ret.orderItemId);
 
     await this.auditLogModel.create({
       actorId: ret.userId, // System acting on behalf of user or simply missing actor
@@ -981,6 +1030,7 @@ export class ReturnsService {
       category: 'REFUND',
       reason: `Refund for return ${ret.id}`,
       idempotencyKey: `return-refund-${ret.id}`,
+      returnId: ret.id, orderId: (item as any).shipment.orderId,
     });
     await ret.update({ status: 'refunded', refundAmount: amount, refundDestination: 'WALLET' } as any);
     await this.auditLogModel.create({
@@ -993,6 +1043,12 @@ export class ReturnsService {
     await this.notifications.notify(ret.userId, 'Refund credited to wallet', `₹${amount.toFixed(2)} has been added to your wallet balance.`);
     // Maintain the running per-line refunded total (§2).
     await this.bumpLineRefunded(ret.orderItemId, amount);
+    await this.markRefundedIfFullyReturned(ret.orderItemId);
+    // Same shop-side effect as the automatic path: debit the shop's earnings for this refund.
+    // returns.handleRefundCompleted skips it (already refunded); FinanceService writes the ledger.
+    this.eventEmitter.emit('RefundCompleted', {
+      returnId: ret.id, amount, transactionId: `wallet_${ret.id}`, orderId: (item as any).shipment.orderId, shopId: item.shopId,
+    });
     // Reverse loyalty points earned on the returned goods VALUE (not the cash refund).
     await this.clawbackLoyaltyForReturn(ret.userId, (item as any).shipment.orderId, ret.orderItemId, retQty);
     return { refunded: true, amount };

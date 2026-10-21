@@ -13,7 +13,7 @@ import { Role } from "@/common/enums/role.enum";
 import { PageOptionsDto } from "@/common/dto/page-options.dto";
 import { paginate, findOr404 } from "@/common/utils/crud.util";
 import { OrderStatus, PaymentMethod } from "@/common/enums/order-status.enum";
-import { ForbiddenException, NotFoundException } from "@/common/errors/http";
+import { ForbiddenException, NotFoundException, ConflictException } from "@/common/errors/http";
 import { DeliveryEngineModule } from "@/modules/delivery-engine/delivery-engine.module";
 import { PromotionsModule } from "@/modules/promotions/promotions.module";
 import { WalletModule } from "@/modules/wallet/wallet.module";
@@ -135,8 +135,8 @@ export class OrdersController {
   /**
    * Pure pricing: subtotal, parcel weight and destination state in, the rate
    * card's answer out. It reads nothing about the caller, so it is public —
-   * a signed-out visitor sending a cash-on-delivery order to WhatsApp needs a
-   * real delivery charge, and this leaks nothing beyond the published card.
+   * a signed-out visitor's cart shows a real delivery charge, and this leaks
+   * nothing beyond the published card.
    */
   @Public()
   @Post("preview")
@@ -401,6 +401,28 @@ export class OrdersController {
     return shipment.status === target;
   }
 
+  /**
+   * The statuses each shop action may start from. Without this any action ran
+   * from any state — "deliver" straight from "placed", "pack" on a cancelled
+   * shipment — and the timeline, stock and earnings went with it.
+   */
+  private static readonly ALLOWED_FROM: Record<string, OrderStatus[]> = {
+    accept: [OrderStatus.PLACED, OrderStatus.PAYMENT_SUCCESS, OrderStatus.ROUTED],
+    pack: [OrderStatus.CONFIRMED],
+    handover: [OrderStatus.PACKED],
+    // FAILED: the shop's own van re-attempts after a failed partner delivery
+    outForDelivery: [OrderStatus.SHIPPED, OrderStatus.HANDED_OVER, OrderStatus.FAILED],
+    deliver: [OrderStatus.OUT_FOR_DELIVERY, OrderStatus.SHIPPED, OrderStatus.HANDED_OVER],
+    cannotFulfill: [OrderStatus.PLACED, OrderStatus.PAYMENT_SUCCESS, OrderStatus.ROUTED, OrderStatus.CONFIRMED],
+  };
+
+  private assertTransition(shipment: OrderShipment, action: string) {
+    const allowed = OrdersController.ALLOWED_FROM[action] || [];
+    if (!allowed.includes(shipment.status as OrderStatus)) {
+      throw new ConflictException("CONFLICT", `A shipment that is "${shipment.status}" cannot be moved by "${action}".`);
+    }
+  }
+
   @RequirePermissions('fulfillment.view')
   @Post("shipments/:id/accept") async accept(@CurrentUser() u: JwtPayload, @Param("id") id: string) {
     const shipment = await this.assertShipmentScope(u, id);
@@ -408,6 +430,7 @@ export class OrdersController {
     if (this.isNoOpTransition(shipment, OrderStatus.CONFIRMED)) {
       return { alreadyApplied: true, status: shipment.status };
     }
+    this.assertTransition(shipment, "accept");
 await this.orders.validatePaymentForFulfillment(shipment.orderId, u);
     const oldStatus = shipment.status;
     await this.ship.update({ status: OrderStatus.CONFIRMED }, { where: { id } });
@@ -440,6 +463,7 @@ await this.orders.validatePaymentForFulfillment(shipment.orderId, u);
     if (this.isNoOpTransition(shipment, OrderStatus.PACKED)) {
       return { alreadyApplied: true, status: shipment.status };
     }
+    this.assertTransition(shipment, "pack");
 await this.orders.validatePaymentForFulfillment(shipment.orderId, u);
     const oldStatus = shipment.status;
     await this.ship.update({ status: OrderStatus.PACKED }, { where: { id } });
@@ -484,6 +508,7 @@ await this.orders.validatePaymentForFulfillment(shipment.orderId, u);
     if (this.isNoOpTransition(shipment, OrderStatus.SHIPPED)) {
       return { alreadyApplied: true, status: shipment.status };
     }
+    this.assertTransition(shipment, "handover");
 await this.orders.validatePaymentForFulfillment(shipment.orderId, u);
     const oldStatus = shipment.status;
 
@@ -574,10 +599,14 @@ await this.orders.validatePaymentForFulfillment(shipment.orderId, u);
   @RequirePermissions('fulfillment.view')
   @Post("shipments/:id/cannot-fulfill") async noFulfill(@CurrentUser() u: JwtPayload, @Param("id") id: string) {
     const shipment = await this.assertShipmentScope(u, id);
+    this.assertTransition(shipment, "cannotFulfill");
     const oldStatus = shipment.status;
-    await this.ship.update({ status: OrderStatus.CANCELLED }, { where: { id } });
+    // Through the normal cancellation path so the units go back on the shelf (and
+    // the customer is refunded if this was the last open shipment). Flipping the
+    // status alone left the stock decremented for good.
+    await this.orders.managerCancel(u, id, "Shop cannot fulfil this shipment");
     // Record the actor and timestamp for the Cannot Fulfill action in the audit trail
-    await this.hist.create({ orderId: shipment.orderId, shipmentId: id, status: "cannot_fulfill", notes: "Shop cannot fulfill — re-routed", actorId: u.sub } as any);
+    await this.hist.create({ orderId: shipment.orderId, shipmentId: id, status: "cannot_fulfill", notes: "Shop cannot fulfill", actorId: u.sub } as any);
     await this.auditLogModel.create({
       actorId: u.sub,
       action: "cannot_fulfill",
@@ -599,6 +628,7 @@ await this.orders.validatePaymentForFulfillment(shipment.orderId, u);
     if (this.isNoOpTransition(shipment, OrderStatus.OUT_FOR_DELIVERY)) {
       return { alreadyApplied: true, status: shipment.status };
     }
+    this.assertTransition(shipment, "outForDelivery");
 await this.orders.validatePaymentForFulfillment(shipment.orderId, u);
     const oldStatus = shipment.status;
     await this.ship.update({ status: OrderStatus.OUT_FOR_DELIVERY }, { where: { id } });
@@ -622,6 +652,7 @@ await this.orders.validatePaymentForFulfillment(shipment.orderId, u);
     if (shipment.status === OrderStatus.DELIVERED) {
       return { ok: true };
     }
+    this.assertTransition(shipment, "deliver");
     const oldStatus = shipment.status;
     await this.ship.update({ status: OrderStatus.DELIVERED, deliveredAt: new Date() }, { where: { id } });
     await this.hist.create({ orderId: shipment.orderId, shipmentId: id, status: OrderStatus.DELIVERED, notes: `Shipment ${shipment.shipmentNumber} marked delivered`, actorId: u.sub } as any);

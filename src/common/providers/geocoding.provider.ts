@@ -1,4 +1,8 @@
 import { logger } from "@/common/utils/logger";
+import { BRAND } from "@/common/brand";
+
+// Nominatim asks every client to identify itself.
+const USER_AGENT = `${BRAND.wordmark.charAt(0)}${BRAND.wordmark.slice(1).toLowerCase()}/1.0 (storefront delivery geocoding; ${BRAND.website})`;
 
 /**
  * Nominatim's usage policy allows at most ~1 request/second per application and
@@ -77,7 +81,7 @@ export class GeocodingProvider {
       const timer = setTimeout(() => ctrl.abort(), 6000);
       const res = await fetch(
         `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`,
-        { headers: { "User-Agent": "Shreshtam/1.0 (storefront delivery geocoding)", Accept: "application/json" }, signal: ctrl.signal },
+        { headers: { "User-Agent": USER_AGENT, Accept: "application/json" }, signal: ctrl.signal },
       );
       clearTimeout(timer);
       if (!res.ok) {
@@ -120,7 +124,7 @@ export class GeocodingProvider {
       const timer = setTimeout(() => ctrl.abort(), 6000);
       const res = await fetch(
         `https://nominatim.openstreetmap.org/search?format=json&addressdetails=1&countrycodes=in&limit=${limit}&q=${encodeURIComponent(q)}`,
-        { headers: { "User-Agent": "Shreshtam/1.0 (storefront delivery geocoding)", Accept: "application/json" }, signal: ctrl.signal },
+        { headers: { "User-Agent": USER_AGENT, Accept: "application/json" }, signal: ctrl.signal },
       );
       clearTimeout(timer);
       if (!res.ok) {
@@ -161,7 +165,7 @@ export class GeocodingProvider {
       const timer = setTimeout(() => ctrl.abort(), 6000);
       const res = await fetch(
         `https://nominatim.openstreetmap.org/reverse?format=json&addressdetails=1&lat=${lat}&lon=${lng}`,
-        { headers: { "User-Agent": "Shreshtam/1.0 (storefront delivery geocoding)", Accept: "application/json" }, signal: ctrl.signal },
+        { headers: { "User-Agent": USER_AGENT, Accept: "application/json" }, signal: ctrl.signal },
       );
       clearTimeout(timer);
       if (!res.ok) { if (res.status !== 429) limiter.set(key, null, true); return null; }

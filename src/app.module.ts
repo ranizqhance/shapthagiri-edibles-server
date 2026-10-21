@@ -74,7 +74,12 @@ import { AppCacheModule } from "./services/cache.module";
     ThrottlerModule.forRoot({
       throttlers: [
         { name: "default", ttl: 60_000, limit: 120 },
-        { name: "write", ttl: 60_000, limit: 30 },
+        // Writes only: a dashboard page fans out several GETs per view, and counting them
+        // here made ordinary browsing hit 429 after a few clicks.
+        {
+          name: "write", ttl: 60_000, limit: 30,
+          skipIf: (ctx) => ["GET", "HEAD", "OPTIONS"].includes(ctx.switchToHttp().getRequest().method),
+        },
       ],
       storage: env.REDIS_ENABLED
         ? new ThrottlerStorageRedisService(

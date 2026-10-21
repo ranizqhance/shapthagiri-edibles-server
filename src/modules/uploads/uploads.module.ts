@@ -30,7 +30,10 @@ const ALLOWED = /^(?:image\/(?:png|jpe?g|webp)|video\/(?:mp4|webm)|application\/
  */
 // `invoices` is deliberately NOT here: it is written by the server only, never
 // by an upload, and nothing should be able to drop a file into it.
-const UPLOAD_FOLDERS = new Set(["products", "documents", "disputes", "returns", "reviews", "general"]);
+// `categories` (dashboard category images) and `avatars` (profile photos) are
+// shown on public pages, so the bucket policy must expose them like `products`;
+// before they were listed here both fell back to the private `general/`.
+const UPLOAD_FOLDERS = new Set(["products", "categories", "avatars", "documents", "disputes", "returns", "reviews", "general"]);
 
 function resolveFolder(requested?: string): string {
   const folder = (requested ?? "").trim().toLowerCase();

@@ -2,7 +2,7 @@ import { Body, Controller, Get, Headers, Param, Post, UseGuards, Module, forward
 import type { Response } from "express";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { SequelizeModule } from "@nestjs/sequelize";
-import { IdempotencyKey, Invoice, Order, Payment, PaymentRefund, EarningWallet, LedgerEntry, OrderShipment, AuditLog, User, Cart } from "@/models";
+import { IdempotencyKey, Invoice, Order, Payment, PaymentRefund, EarningWallet, LedgerEntry, OrderShipment, AuditLog, User, Cart, DeliveryPartner } from "@/models";
 import { RequirePermissions } from "@/common/decorators/permissions.decorator";
 import { ParseUUIDPipe } from '@nestjs/common';
 import { CurrentUser } from '@/common/decorators/current-user.decorator';
@@ -54,11 +54,15 @@ export class PaymentsController {
     return this.paymentsService.retryPayment(orderId, u);
   }
 
+  /**
+   * Record the cash for a cash-on-delivery order. Not permission-gated at the
+   * route: the delivery partner carrying it and the fulfilling shop's staff
+   * hold no finance rights, so the service scopes by the caller instead.
+   */
   @ApiBearerAuth()
-  @RequirePermissions('finance.manageWallet')
   @Post("cod/confirm/:orderId")
-  async cod(@Param("orderId") id: string) {
-    return this.paymentsService.confirmCod(id);
+  async cod(@CurrentUser() u: JwtPayload, @Param("orderId", ParseUUIDPipe) id: string) {
+    return this.paymentsService.confirmCod(id, u);
   }
 
   /** Cancel a pending payment */
@@ -133,6 +137,8 @@ export class PaymentsController {
       User,
       // Carts are converted here, on capture, not at placement.
       Cart,
+      // Who may record cash on delivery (the partner carrying the order).
+      DeliveryPartner,
     ]),
     forwardRef(() => NotificationsModule),
     forwardRef(() => OrdersModule),

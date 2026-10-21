@@ -1,4 +1,6 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, Delete } from "@nestjs/common";
+import { Body, Controller, Get, Param, Patch, Post, Query, Delete, Headers } from "@nestjs/common";
+import jwt from "jsonwebtoken";
+import { env } from "@/config/env";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { InjectModel, InjectConnection } from "@nestjs/sequelize";
 import { Sequelize } from "sequelize-typescript";
@@ -25,6 +27,24 @@ import { NotificationEventType } from "@/common/enums/notification-event.enum";
 import { haversineKm } from "@/common/utils/geo.util";
 import { geocodingProvider } from "@/common/providers/geocoding.provider";
 
+/** Roles that see a shop's full row and its live metrics. */
+const STAFF_ROLES = new Set<string>([Role.ADMIN, Role.SHOP_MANAGER, Role.OPERATIONS, Role.FINANCE, Role.MARKETING, Role.SUPPORT]);
+
+/**
+ * What a signed-out visitor (or a customer) sees of a shop: where it is, how
+ * to reach it, when it is open and how far it delivers. Never the manager,
+ * the revenue or the fulfilment figures.
+ */
+function publicShop(row: any) {
+  const s = typeof row?.toJSON === "function" ? row.toJSON() : row;
+  return {
+    id: s.id, name: s.name, address: s.address, city: s.city, state: s.state, country: s.country,
+    postalCode: s.postalCode, lat: s.lat, lng: s.lng, phone: s.phone, email: s.email,
+    isActive: s.isActive, pickupEnabled: s.pickupEnabled, openingTime: s.openingTime, closingTime: s.closingTime,
+    deliveryRadiusKm: s.deliveryRadiusKm,
+  };
+}
+
 @ApiTags("Shops")
 @RequirePermissions('shops.view')
 @Controller("shops")
@@ -46,12 +66,39 @@ export class ShopsController {
     private stockTransfer: StockTransferService,
   ) {}
 
+  /**
+   * Public — the storefront reads it for the serving-shop badge — but the
+   * full rows and live metrics only go to signed-in staff. Every dashboard
+   * screen calls this with its token; anyone else gets `publicShop`.
+   */
   @Public()
   @Get()
-  async list(@Query() opts: PageOptionsDto) {
+  async list(@Query() opts: PageOptionsDto, @Headers("authorization") authorization?: string) {
     const page = await paginate(this.shop, opts);
+    if (!(await this.isStaff(authorization))) {
+      page.items = page.items.map(publicShop);
+      return page;
+    }
     page.items = await this.attachShopMetrics(page.items);
     return page;
+  }
+
+  /**
+   * Whether a public route's caller is signed-in staff. Public routes skip the
+   * JWT guard, so the token is checked here: valid signature, active account,
+   * current token version (the same tests JwtStrategy applies), staff role.
+   * Anything short of that is treated as anonymous rather than refused.
+   */
+  private async isStaff(authorization?: string): Promise<boolean> {
+    const [scheme, token] = (authorization ?? "").split(" ");
+    if (scheme !== "Bearer" || !token) return false;
+    try {
+      const payload = jwt.verify(token, env.JWT_ACCESS_SECRET) as JwtPayload;
+      const user = await this.userModel.findByPk(payload.sub, { attributes: ["id", "role", "isActive", "tokenVersion"] });
+      return !!user && user.isActive && (payload.tv ?? 0) === user.tokenVersion && STAFF_ROLES.has(user.role);
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -319,8 +366,9 @@ export class ShopsController {
 
   @Public()
   @Get(":id")
-  detail(@Param("id") id: string) {
-    return findOr404(this.shop, id, "Shop");
+  async detail(@Param("id") id: string, @Headers("authorization") authorization?: string) {
+    const shop = await findOr404<Shop>(this.shop, id, "Shop");
+    return (await this.isStaff(authorization)) ? shop : publicShop(shop);
   }
 
   @ApiBearerAuth()
@@ -619,7 +667,10 @@ export class ShopsController {
       await this.shop.update(updatePayload, { where: { id }, transaction: t });
       const fresh = await this.shop.findByPk(id, { transaction: t });
 
-      if (!b.newManager) {
+      // Only a managerId that is actually sent changes the manager. Comparing against an
+      // omitted one released the current manager on any edit (e.g. a radius change), which
+      // cleared their shopId and locked them out of their own fulfilment queue.
+      if (!b.newManager && b.managerId !== undefined) {
         if (shop.managerId && shop.managerId !== b.managerId) {
           await this.userModel.update({ shopId: null }, { where: { id: shop.managerId }, transaction: t });
         }

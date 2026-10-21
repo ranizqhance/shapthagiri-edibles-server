@@ -45,11 +45,10 @@ export const ERROR_CODES = {
   ORDER_ADDRESS_UNSERVICEABLE:{ status: 400, message: "Selected address is not serviceable" },
   // Cash on delivery against an unverified identity: nothing ties a refused
   // consignment back to a real person, so those accounts must pay online.
-  // No longer thrown — COD no longer creates an order at all (COD_VIA_WHATSAPP).
+  // Not thrown — COD is open to every signed-in customer.
   // Kept so an older client that still handles the code does not see an unknown one.
   COD_REQUIRES_PHONE:         { status: 400, message: "Cash on delivery needs a verified mobile number" },
-  // COD is not an order. The storefront hands it to WhatsApp instead, so nothing
-  // is written; this refuses any client that still tries to place one.
+  // Not thrown — COD places a real order again. Kept for older clients.
   COD_VIA_WHATSAPP:           { status: 400, message: "Cash on delivery orders are placed over WhatsApp" },
 
   // Payments
@@ -87,6 +86,7 @@ export const ERROR_CODES = {
 
   // Idempotency
   IDEMPOTENCY_CONFLICT:       { status: 409, message: "Request already processed with different payload" },
+  IDEMPOTENCY_IN_PROGRESS:    { status: 409, message: "This request is still being processed" },
 } as const satisfies Record<string, ErrorCodeMeta>;
 
 export type ErrorCode = keyof typeof ERROR_CODES;

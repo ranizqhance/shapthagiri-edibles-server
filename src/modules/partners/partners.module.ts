@@ -7,7 +7,8 @@ import { InjectModel, SequelizeModule } from "@nestjs/sequelize";
 import {
   DeliveryAssignment, DeliveryEarning, DeliveryLocationPing, DeliveryPartner,
   DeliveryPartnerDocument, DeliveryPayout, FailedDelivery, Order, OrderShipment,
-  OrderStatusHistory, User, UserAddress, Shop, OrderItem, EarningWallet, DeliveryZone, AuditLog
+  OrderStatusHistory, User, UserAddress, Shop, OrderItem, EarningWallet, DeliveryZone, AuditLog,
+  Setting,
 } from "@/models";
 import { Public } from "@/common/decorators/public.decorator";
 import { Roles } from "@/common/decorators/roles.decorator";
@@ -18,7 +19,7 @@ import { JwtPayload } from "@/modules/auth/jwt.strategy";
 import { PageOptionsDto } from "@/common/dto/page-options.dto";
 import { paginate, findOr404 } from "@/common/utils/crud.util";
 import { AssignmentExpiredException, NoPartnerAvailableException } from "@/common/errors/domain";
-import { ForbiddenException, BadRequestException, NotFoundException } from "@/common/errors/http";
+import { ForbiddenException, BadRequestException, NotFoundException, ConflictException } from "@/common/errors/http";
 import { OrderStatus } from "@/common/enums/order-status.enum";
 import { hashPassword } from "@/common/utils/password.util";
 import { buildDeliveryPartnerDefaults, createPartnerDocuments } from "@/common/utils/partner.util";
@@ -28,6 +29,7 @@ import {
 } from "@/common/dto/common.dto";
 import { NotificationsModule } from "@/modules/notifications/notifications.module";
 import { NotificationsService } from "@/modules/notifications/notifications.service";
+import { TrackingGateway, TrackingModule } from "@/modules/tracking/tracking.gateway";
 import { pickPartner, candidateWhere } from "@/common/utils/partner-dispatch.util";
 
 @ApiTags("Delivery Partners")
@@ -50,6 +52,7 @@ export class PartnersController {
     @InjectModel(AuditLog) private audit: typeof AuditLog,
     @InjectModel(User) private user: typeof User,
     private notifications: NotificationsService,
+    private tracking: TrackingGateway,
   ) {}
 
   /** Audit + notify a partner on an admin lifecycle transition. */
@@ -84,6 +87,16 @@ export class PartnersController {
     const p = await this.partner.findOne({ where: { userId: u.sub } });
     if (!p) throw new NoPartnerAvailableException();
     return p;
+  }
+
+  /**
+   * What a partner earns per completed delivery: the `delivery.partnerBaseEarning`
+   * setting (₹50 until set). Decided here, never taken from the partner app.
+   */
+  private async baseEarning(): Promise<number> {
+    const row = await Setting.findOne({ where: { key: "delivery.partnerBaseEarning" } });
+    const n = Number(row?.value);
+    return Number.isFinite(n) && n >= 0 ? n : 50;
   }
 
   /** Load an assignment and verify it belongs to the calling partner. */
@@ -295,6 +308,7 @@ export class PartnersController {
     const p = await this.me(u);
     await p.update({ currentLat: b.lat, currentLng: b.lng });
     await this.ping.create({ partnerId: p.id, lat: b.lat, lng: b.lng } as any);
+    await this.tracking.broadcastPartnerLocation(p.id, b.lat, b.lng);
     return { ok: true };
   }
   @ApiBearerAuth() @Roles(Role.DELIVERY_PARTNER) @Get("me/assignments") async myAssign(@CurrentUser() u: JwtPayload, @Query() opts: PageOptionsDto) {
@@ -372,6 +386,7 @@ export class PartnersController {
   }
   @ApiBearerAuth() @Roles(Role.DELIVERY_PARTNER) @Post("assignments/:id/pickup") async pickup(@CurrentUser() u: JwtPayload, @Param("id") id: string) {
     const a = await this.ownAssignment(u, id);
+    if (a.status !== "accepted") throw new ConflictException("CONFLICT", `This job is ${a.status}; only an accepted job can be picked up.`);
     await a.update({ status: "picked", pickedAt: new Date() });
     await this.ship.update({ status: OrderStatus.OUT_FOR_DELIVERY }, { where: { id: a.shipmentId } });
     const shipment = await this.ship.findByPk(a.shipmentId);
@@ -387,6 +402,9 @@ export class PartnersController {
   }
   @ApiBearerAuth() @Roles(Role.DELIVERY_PARTNER) @Post("assignments/:id/deliver") async deliver(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() b: DeliverDto) {
     const a = await this.ownAssignment(u, id);
+    // Only a picked-up job can be delivered — once. A repeat call used to mark it
+    // delivered again and write a second earning.
+    if (a.status !== "picked") throw new ConflictException("CONFLICT", `This job is ${a.status}; only a picked-up job can be delivered.`);
     await a.update({ status: "delivered", deliveredAt: new Date() });
     await this.ship.update({ status: OrderStatus.DELIVERED, deliveredAt: new Date() }, { where: { id: a.shipmentId } });
     const shipment = await this.ship.findByPk(a.shipmentId);
@@ -406,12 +424,15 @@ export class PartnersController {
         referenceId: shipment.shipmentNumber,
       });
     }
-    await this.earning.create({ partnerId: a.partnerId, assignmentId: a.id, amount: b.earnings ?? 50, type: "base" } as any);
+    // The rate is the platform's, never the app's: the amount in the request body
+    // is ignored (it used to be stored as sent — ₹5,000 was accepted).
+    await this.earning.create({ partnerId: a.partnerId, assignmentId: a.id, amount: await this.baseEarning(), type: "base" } as any);
     await this.notifyCustomer(a.shipmentId, "Delivered ✅", "Your order has been delivered. Enjoy — and please rate your experience!");
     return { delivered: true };
   }
   @ApiBearerAuth() @Roles(Role.DELIVERY_PARTNER) @Post("assignments/:id/fail") async fail(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() b: FailDto) {
     const a = await this.ownAssignment(u, id);
+    if (!["accepted", "picked"].includes(a.status)) throw new ConflictException("CONFLICT", `This job is ${a.status}; only an active job can be marked failed.`);
     await a.update({ status: "failed" });
 
     // Count previous attempts for this shipment to correctly increment attemptNo
@@ -534,6 +555,7 @@ export class PartnersController {
       DeliveryZone, AuditLog
     ]),
     NotificationsModule,
+    TrackingModule,
   ],
   controllers: [PartnersController],
 })

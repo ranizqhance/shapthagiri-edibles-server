@@ -3,14 +3,14 @@ import { cleanEnv, str, port, bool, num } from "envalid";
 
 export const env = cleanEnv(process.env, {
   NODE_ENV: str({ choices: ["development", "test", "production"], default: "development" }),
-  PORT: port({ default: 4000 }),
+  PORT: port({ default: 5777 }),
   API_PREFIX: str({ default: "/api/v1" }),
 
   DB_HOST: str({ default: "localhost" }),
   DB_PORT: port({ default: 5432 }),
   DB_USER: str({ default: "postgres" }),
   DB_PASSWORD: str({ default: "postgres" }),
-  DB_NAME: str({ default: "shreshtam" }),
+  DB_NAME: str({ default: "shapthagiri" }),
   DB_LOGGING: bool({ default: false }),
   DB_AUTO_SYNC: bool({ default: false }),
 
@@ -67,7 +67,7 @@ export const env = cleanEnv(process.env, {
   MAIL_SECURE: bool({ default: false }),
   MAIL_USER: str({ default: "" }),
   MAIL_PASS: str({ default: "" }),
-  MAIL_FROM: str({ default: "Shreshtam <shreshtamgroup@gmail.com>" }),
+  MAIL_FROM: str({ default: "Shapthagiri Edibles <shapthagirirefineries@gmail.com>" }),
 
   // Gmail (app-password) — preferred when set. Read from .env, never hardcoded.
   GMAIL_USER: str({ default: "" }),

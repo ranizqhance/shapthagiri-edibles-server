@@ -1,4 +1,4 @@
-import { Table, Column, Model, DataType, Default, PrimaryKey, AllowNull, ForeignKey, BelongsTo, HasMany } from "sequelize-typescript";
+import { Table, Column, Model, DataType, Default, PrimaryKey, AllowNull, ForeignKey, BelongsTo, HasMany, AfterCreate } from "sequelize-typescript";
 import { OrderStatus } from "../common/enums/order-status.enum";
 import { Order } from "./order.model";
 import { Shop } from "./shop.model";
@@ -180,6 +180,21 @@ export class OrderStatusHistory extends Model<OrderStatusHistory> {
   @ForeignKey(() => User) @Column(DataType.UUID) declare actorId: string | null;
   /** Resolved actor profile — populated when queries include the User association. */
   @BelongsTo(() => User, { foreignKey: "actorId", constraints: false }) declare actor?: User;
+
+  /** Set by the socket gateway; told about each shipment status row once it is committed. */
+  static onShipmentStatus?: (row: { shipmentId: string; orderId: string | null; status: string }) => void;
+
+  @AfterCreate
+  static announceShipmentStatus(row: OrderStatusHistory, options: any) {
+    const listener = OrderStatusHistory.onShipmentStatus;
+    if (!listener || !row.shipmentId) return;
+    const fire = () => {
+      try { listener({ shipmentId: row.shipmentId!, orderId: row.orderId, status: row.status }); } catch { /* never fail a write over a push */ }
+    };
+    // Inside a transaction, wait for the commit: a rolled-back status must not reach anyone.
+    if (options?.transaction) options.transaction.afterCommit(fire);
+    else fire();
+  }
 }
 
 @Table({ tableName: "routing_decisions", timestamps: true, indexes: [{ name: "idx_routing_order", fields: ["orderId"] }] })

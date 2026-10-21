@@ -67,11 +67,11 @@ export class UpdateProfileDto {
 
 export class AddressDto {
   @ApiProperty({ example: "Home" }) @IsString() label!: string;
-  @ApiProperty({ example: "16/257A, Pulinkav" }) @IsString() line1!: string;
-  @ApiPropertyOptional({ example: "Cherukara PO" }) @IsOptional() @IsString() line2?: string;
-  @ApiPropertyOptional({ example: "Malappuram" }) @IsOptional() @IsString() city?: string;
+  @ApiProperty({ example: "Neelamkatchi" }) @IsString() line1!: string;
+  @ApiPropertyOptional({ example: "Vannamada" }) @IsOptional() @IsString() line2?: string;
+  @ApiPropertyOptional({ example: "Palakkad" }) @IsOptional() @IsString() city?: string;
   @ApiPropertyOptional({ example: "Kerala" }) @IsOptional() @IsString() state?: string;
-  @ApiPropertyOptional({ example: "679340" }) @IsOptional() @IsString() pincode?: string;
+  @ApiPropertyOptional({ example: "678555" }) @IsOptional() @IsString() pincode?: string;
   @ApiPropertyOptional() @IsOptional() @IsNumber() lat?: number;
   @ApiPropertyOptional() @IsOptional() @IsNumber() lng?: number;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() isDefault?: boolean;
@@ -94,8 +94,8 @@ export class PaymentMethodDto {
 
 /* ===== Catalog ===== */
 export class CategoryDto {
-  @ApiProperty({ example: "Pickles" }) @IsString() name!: string;
-  @ApiPropertyOptional({ example: "pickles" }) @IsOptional() @IsString() slug?: string;
+  @ApiProperty({ example: "Coconut Oil" }) @IsString() name!: string;
+  @ApiPropertyOptional({ example: "coconut-oil" }) @IsOptional() @IsString() slug?: string;
   @ApiPropertyOptional() @IsOptional() @IsUUID() parentId?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() icon?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() imageUrl?: string;
@@ -105,8 +105,8 @@ export class CategoryDto {
 
 // DTO for creating a new Category
 export class CreateCategoryDto {
-  @ApiProperty({ example: 'Pickles' }) @IsString() name!: string;
-  @ApiPropertyOptional({ example: 'pickles' }) @IsOptional() @IsString() slug?: string;
+  @ApiProperty({ example: 'Coconut Oil' }) @IsString() name!: string;
+  @ApiPropertyOptional({ example: 'coconut-oil' }) @IsOptional() @IsString() slug?: string;
   @ApiPropertyOptional() @IsOptional() @IsUUID() parentId?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() icon?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() imageUrl?: string;
@@ -117,10 +117,12 @@ export class CreateCategoryDto {
 export class UpdateCategoryDto extends PartialType(CategoryDto) {}
 
 export class BrandDto {
-  @ApiProperty({ example: "Shreshtam" }) @IsString() name!: string;
-  @ApiPropertyOptional({ example: "shreshtam" }) @IsOptional() @IsString() slug?: string;
+  @ApiProperty({ example: "Pooram" }) @IsString() name!: string;
+  @ApiPropertyOptional({ example: "pooram" }) @IsOptional() @IsString() slug?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() logoUrl?: string;
 }
+
+export class UpdateBrandDto extends PartialType(BrandDto) {}
 
 export class ProductPolicyDto {
   @ApiPropertyOptional() @IsOptional() @IsBoolean() isReturnable?: boolean;
@@ -129,9 +131,9 @@ export class ProductPolicyDto {
 }
 
 export class ProductDto {
-  @ApiProperty({ example: "Kadumanga (Tender Mango Pickle)" }) @IsString() title!: string;
-  @ApiPropertyOptional({ example: "kadumanga-tender-mango-pickle" }) @IsOptional() @IsString() slug?: string;
-  @ApiPropertyOptional({ example: "Traditional Kerala tender mango pickle" }) @IsOptional() @IsString() subtitle?: string;
+  @ApiProperty({ example: "Pooram Coconut Oil 1 L Pouch" }) @IsString() title!: string;
+  @ApiPropertyOptional({ example: "pooram-coconut-oil-1-l-pouch" }) @IsOptional() @IsString() slug?: string;
+  @ApiPropertyOptional({ example: "Roasted coconut oil" }) @IsOptional() @IsString() subtitle?: string;
   @ApiPropertyOptional() @IsOptional() @IsUUID() brandId?: string;
   @ApiPropertyOptional() @IsOptional() @IsUUID() categoryId?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() description?: string;
@@ -162,7 +164,7 @@ export class VariantDto {
 
 export class MediaDto {
   @ApiPropertyOptional() @IsOptional() @IsUUID() variantId?: string;
-  @ApiProperty({ example: "/shreshtam/products/kadumanga-tender-mango-pickle-1.png" }) @IsString() url!: string;
+  @ApiProperty({ example: "/packs/pooram-1ltr.webp" }) @IsString() url!: string;
   @ApiProperty({ example: "image" }) @IsString() type!: string;
   @ApiPropertyOptional() @IsOptional() @IsInt() sortOrder?: number;
 }
@@ -190,27 +192,27 @@ export class CompareDto {
  */
 export class NewShopManagerDto {
   @ApiProperty({ example: "Jane Doe" }) @IsString() @IsNotEmpty() name!: string;
-  @ApiProperty({ example: "manager@shreshtam.in" }) @IsEmail() email!: string;
+  @ApiProperty({ example: "manager@shapthagiri-edibles.com" }) @IsEmail() email!: string;
   @ApiProperty({ example: "s3cret123" }) @IsString() @MinLength(6, { message: "Password must be at least 6 characters" }) password!: string;
   @ApiPropertyOptional() @IsOptional() @IsString() @Matches(/^\+?[0-9]{10,15}$/, { message: "Invalid phone number format" }) phone?: string;
 }
 
 export class ShopDto {
-  @ApiProperty({ example: "Shreshtam — Cherukara" }) @IsString() name!: string;
-  @ApiProperty({ example: "16/257A, Pulinkav, Cherukara PO" }) @IsString() address!: string;
-  @ApiProperty({ example: "Malappuram" }) @IsString() city!: string;
-  @ApiProperty({ example: 10.9264 }) @IsNumber() lat!: number;
-  @ApiProperty({ example: 76.2275 }) @IsNumber() lng!: number;
-  @ApiPropertyOptional({ example: "+919902012150" }) @IsOptional() @IsString() @Matches(/^\+?[0-9]{10,15}$/, { message: "Invalid phone number format" }) phone?: string;
+  @ApiProperty({ example: "Shapthagiri Refineries — Vannamada" }) @IsString() name!: string;
+  @ApiProperty({ example: "Neelamkatchi, Vannamada" }) @IsString() address!: string;
+  @ApiProperty({ example: "Palakkad" }) @IsString() city!: string;
+  @ApiProperty({ example: 10.7867 }) @IsNumber() lat!: number;
+  @ApiProperty({ example: 76.6548 }) @IsNumber() lng!: number;
+  @ApiPropertyOptional({ example: "+919446380334" }) @IsOptional() @IsString() @Matches(/^\+?[0-9]{10,15}$/, { message: "Invalid phone number format" }) phone?: string;
   @ApiPropertyOptional() @IsOptional() @IsInt() processingTimeMinutes?: number;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() pickupEnabled?: boolean;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() isActive?: boolean;
 
-  @ApiPropertyOptional({ example: "shreshtamgroup@gmail.com" }) @IsOptional() @IsEmail() email?: string;
+  @ApiPropertyOptional({ example: "shapthagirirefineries@gmail.com" }) @IsOptional() @IsEmail() email?: string;
   @ApiPropertyOptional({ example: "Kerala" }) @IsOptional() @IsString() state?: string;
   @ApiPropertyOptional({ example: "India" }) @IsOptional() @IsString() country?: string;
-  @ApiPropertyOptional({ example: "679340" }) @IsOptional() @IsString() postalCode?: string;
-  @ApiPropertyOptional() @IsOptional() @IsNumber() @Min(0.1, { message: "Radius must be greater than 0 km" }) @Max(100, { message: "Radius cannot exceed 100 km" }) deliveryRadiusKm?: number;
+  @ApiPropertyOptional({ example: "678555" }) @IsOptional() @IsString() postalCode?: string;
+  @ApiPropertyOptional() @IsOptional() @IsNumber() @Min(0.1, { message: "Radius must be greater than 0 km" }) @Max(4000, { message: "Radius cannot exceed 4000 km" }) deliveryRadiusKm?: number;
   @ApiPropertyOptional() @IsOptional() @IsArray() @IsString({ each: true }) supportedZones?: string[];
   @ApiPropertyOptional() @IsOptional() @IsArray() @IsString({ each: true }) weeklyHolidays?: string[];
   @ApiPropertyOptional() @IsOptional() @IsString() openingTime?: string;
@@ -258,7 +260,8 @@ export class InventoryUpdateDto {
 export class InventoryBulkItemDto {
   @ApiPropertyOptional() @IsOptional() @IsUUID() variantId?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() sku?: string;
-  @ApiProperty() @IsInt() quantity!: number;
+  // Absolute stock level — never below zero.
+  @ApiProperty() @IsInt() @Min(0) quantity!: number;
   @ApiPropertyOptional() @IsOptional() @IsNumber() priceOverride?: number;
 }
 
@@ -272,8 +275,8 @@ export class InventoryBulkDto {
 
 export class ScanDto {
   @ApiProperty({ example: "8901234567890" }) @IsString() barcode!: string;
-  @ApiProperty({ example: "IN" }) @IsString() direction!: string;
-  @ApiPropertyOptional({ example: 1 }) @IsOptional() @IsInt() quantity?: number;
+  @ApiProperty({ example: "IN", enum: ["IN", "OUT"] }) @IsIn(["IN", "OUT", "in", "out"]) direction!: string;
+  @ApiPropertyOptional({ example: 1 }) @IsOptional() @IsInt() @Min(1) quantity?: number;
 }
 
 /**
@@ -285,7 +288,7 @@ export class OrderLookupDto {
   @IsString() @MinLength(4) @MaxLength(40)
   orderNumber!: string;
 
-  @ApiProperty({ example: "9902012150", description: "The mobile number or email the order was placed with." })
+  @ApiProperty({ example: "9446380334", description: "The mobile number or email the order was placed with." })
   @IsString() @MinLength(4) @MaxLength(180)
   contact!: string;
 }
@@ -434,19 +437,19 @@ export class HolidayDto {
 /* ===== Orders ===== */
 export class PlaceOrderDto {
   @ApiProperty() @IsObject() addressSnapshot!: Record<string, unknown>;
-  @ApiProperty({ example: 10.9264 }) @IsNumber() lat!: number;
-  @ApiProperty({ example: 76.2275 }) @IsNumber() lng!: number;
+  @ApiProperty({ example: 10.7867 }) @IsNumber() lat!: number;
+  @ApiProperty({ example: 76.6548 }) @IsNumber() lng!: number;
   /**
-   * The methods that can still place an order here. `cod` is absent on purpose:
-   * cash on delivery is handed to WhatsApp and creates nothing, and the service
-   * refuses it too. `gift_card`/`wallet` are not accepted from the client — the
-   * service derives them when stored value covers the whole amount.
+   * How the customer pays. `cod` places the order straight away and staff
+   * confirm the cash on delivery; the others go through the gateway
+   * (payments/intent → verify). `gift_card`/`wallet` are not accepted from the
+   * client — the service derives them when stored value covers the whole amount.
    *
    * Was `@IsString()` alone, which let any string through to a Postgres ENUM
    * column and turned a typo into a 500.
    */
-  @ApiProperty({ example: "upi", enum: ["card", "upi", "net_banking"] })
-  @IsIn(["card", "upi", "net_banking"])
+  @ApiProperty({ example: "upi", enum: ["cod", "card", "upi", "net_banking"] })
+  @IsIn(["cod", "card", "upi", "net_banking"])
   paymentMethod!: string;
   @ApiPropertyOptional() @IsOptional() @IsString() couponCode?: string;
   @ApiPropertyOptional() @IsOptional() @IsBoolean() express?: boolean;
@@ -496,10 +499,13 @@ export class LoyaltyAdjustDto {
 }
 
 /* ===== Partners ===== */
+/** Matches the delivery_partners.vehicle enum. */
+const PARTNER_VEHICLES = ["Bicycle", "Motorcycle", "Car", "Van"];
+
 export class PartnerRegisterDto {
   @ApiProperty({ example: "Akash P" }) @IsString() name!: string;
   @ApiProperty({ example: "+919876510022" }) @IsString() phone!: string;
-  @ApiProperty({ example: "Motorcycle" }) @IsString() vehicle!: string;
+  @ApiProperty({ example: "Motorcycle", enum: ["Bicycle", "Motorcycle", "Car", "Van"] }) @IsString() @IsIn(PARTNER_VEHICLES, { message: "Vehicle must be Bicycle, Motorcycle, Car or Van" }) vehicle!: string;
   @ApiPropertyOptional() @IsOptional() @IsString() vehicleNumber?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() avatarUrl?: string;
   @ApiPropertyOptional() @IsOptional() @IsUUID() userId?: string;
@@ -530,7 +536,10 @@ export class FailDto {
 
 /* ===== Delivery-partner onboarding & admin lifecycle ===== */
 export class OnboardDocumentDto {
-  @ApiProperty({ example: "driving_license" }) @IsString() type!: string;
+  // The types approval checks for (partners.module requiredDocTypes). Anything else was
+  // stored silently and the applicant was then stuck at "outstanding: gov_id, rc, insurance".
+  @ApiProperty({ example: "driving_license", enum: ["gov_id", "driving_license", "rc", "insurance"] })
+  @IsString() @IsIn(["gov_id", "driving_license", "rc", "insurance"], { message: "Document type must be gov_id, driving_license, rc or insurance" }) type!: string;
   @ApiProperty() @IsString() url!: string;
   @ApiPropertyOptional() @IsOptional() @IsString() expiresAt?: string;
 }
@@ -539,7 +548,7 @@ export class PartnerOnboardDto {
   @ApiProperty({ example: "Akash P" }) @IsString() name!: string;
   @ApiProperty({ example: "+919876510022" }) @IsString() phone!: string;
   @ApiPropertyOptional() @IsOptional() @IsString() email?: string;
-  @ApiProperty({ example: "Motorcycle" }) @IsString() vehicle!: string;
+  @ApiProperty({ example: "Motorcycle", enum: ["Bicycle", "Motorcycle", "Car", "Van"] }) @IsString() @IsIn(PARTNER_VEHICLES, { message: "Vehicle must be Bicycle, Motorcycle, Car or Van" }) vehicle!: string;
   @ApiPropertyOptional() @IsOptional() @IsString() vehicleNumber?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() avatarUrl?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() address?: string;
@@ -550,7 +559,7 @@ export class PartnerOnboardDto {
   @ApiPropertyOptional() @IsOptional() @IsString() bankName?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() emergencyContactName?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() emergencyContactPhone?: string;
-  @ApiPropertyOptional({ type: [OnboardDocumentDto] }) @IsOptional() @IsArray() documents?: OnboardDocumentDto[];
+  @ApiPropertyOptional({ type: [OnboardDocumentDto] }) @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => OnboardDocumentDto) documents?: OnboardDocumentDto[];
 }
 
 export class RejectPartnerDto {
@@ -915,16 +924,21 @@ export class AdminCreateUserDto {
 
   // Delivery-partner details — REQUIRED only when role === "delivery_partner"
   // (ValidateIf skips them for every other role, keeping the fast invite path).
-  @ApiPropertyOptional({ example: "Motorcycle" }) @ValidateIf((o) => o.role === "delivery_partner") @IsString() @IsNotEmpty() vehicle?: string;
+  @ApiPropertyOptional({ example: "Motorcycle" }) @ValidateIf((o) => o.role === "delivery_partner") @IsString() @IsIn(PARTNER_VEHICLES, { message: "Vehicle must be Bicycle, Motorcycle, Car or Van" }) vehicle?: string;
   @ApiPropertyOptional({ example: "KL-10-AA-0001" }) @ValidateIf((o) => o.role === "delivery_partner") @IsString() @IsNotEmpty() vehicleNumber?: string;
-  @ApiPropertyOptional({ example: "Malappuram" }) @ValidateIf((o) => o.role === "delivery_partner") @IsString() @IsNotEmpty() city?: string;
+  @ApiPropertyOptional({ example: "Palakkad" }) @ValidateIf((o) => o.role === "delivery_partner") @IsString() @IsNotEmpty() city?: string;
   @ApiPropertyOptional() @ValidateIf((o) => o.role === "delivery_partner") @IsUUID() zoneId?: string;
-  @ApiPropertyOptional({ example: "Cherukara PO, Malappuram, Kerala 679340" }) @ValidateIf((o) => o.role === "delivery_partner") @IsString() @IsNotEmpty() address?: string;
+  @ApiPropertyOptional({ example: "Vannamada, Palakkad, Kerala 678555" }) @ValidateIf((o) => o.role === "delivery_partner") @IsString() @IsNotEmpty() address?: string;
   @ApiPropertyOptional({ example: "SBI" }) @ValidateIf((o) => o.role === "delivery_partner") @IsString() @IsNotEmpty() bankName?: string;
   @ApiPropertyOptional({ example: "1234567890" }) @ValidateIf((o) => o.role === "delivery_partner") @IsString() @IsNotEmpty() bankAccountNumber?: string;
   @ApiPropertyOptional({ example: "SBIN0000123" }) @ValidateIf((o) => o.role === "delivery_partner") @IsString() @IsNotEmpty() bankIfscCode?: string;
   // Required documents (gov_id, driving_license, rc, insurance) — enforced in createUser.
   @ApiPropertyOptional({ type: [OnboardDocumentDto] }) @ValidateIf((o) => o.role === "delivery_partner") @IsArray() @ValidateNested({ each: true }) @Type(() => OnboardDocumentDto) documents?: OnboardDocumentDto[];
+}
+
+/** Block (false) or unblock (true) an account from the Users screen. */
+export class UpdateUserStatusDto {
+  @ApiProperty({ example: false }) @IsBoolean() isActive!: boolean;
 }
 
 export class UpdateRoleDto {

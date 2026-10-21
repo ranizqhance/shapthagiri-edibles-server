@@ -24,6 +24,7 @@ const EXCLUDED_STATUSES = [
   OrderStatus.REFUND_PENDING,
   OrderStatus.REFUNDED,
   OrderStatus.FAILED,
+  OrderStatus.PAYMENT_PENDING, // online order never paid
 ];
 
 /** Approved return status string on the returns table. */
@@ -64,11 +65,24 @@ export class AnalyticsController {
     return u.role === Role.SHOP_MANAGER ? (u.shopId ?? null) : null;
   }
 
+  /** A shop's order lines that count as sales: the shipment was not cancelled, failed, refunded or left unpaid. */
+  private shopSaleLines(shopId: string) {
+    return this.item.findAll({
+      where: { shopId },
+      include: [{ model: OrderShipment, attributes: ["orderId"], required: true, where: { status: { [Op.notIn]: EXCLUDED_STATUSES } } }],
+    });
+  }
+
+  /** Platform revenue: order totals, excluding orders that never became a sale. */
+  private platformRevenue() {
+    return this.order.sum("total", { where: { status: { [Op.notIn]: EXCLUDED_STATUSES } } }).then((v) => v ?? 0);
+  }
+
   @Get("overview") async overview(@CurrentUser() u: JwtPayload) {
     const shopId = this.managerShop(u);
     if (shopId) {
       // Shop-scoped figures for a shop manager.
-      const items = await this.item.findAll({ where: { shopId } });
+      const items = await this.shopSaleLines(shopId);
       const revenue = items.reduce((s, i) => s + Number(i.price) * i.quantity, 0);
       const shipments = await this.ship.findAll({ where: { shopId }, attributes: ["orderId"] });
       const orderIds = [...new Set(shipments.map((s) => s.orderId))];
@@ -76,7 +90,7 @@ export class AnalyticsController {
       return { revenue, totalOrders: orderIds.length, customers: new Set(orders.map((o) => o.userId)).size, activeShops: 1, scope: "shop" };
     }
     const [revenue, totalOrders, customers, activeShops] = await Promise.all([
-      this.order.sum("total").then((v) => v ?? 0),
+      this.platformRevenue(),
       this.order.count(),
       this.user.count({ where: { role: "customer" as any } }),
       this.shop.count({ where: { isActive: true } }),
@@ -87,10 +101,10 @@ export class AnalyticsController {
   @Get("revenue") async revenue(@CurrentUser() u: JwtPayload) {
     const shopId = this.managerShop(u);
     if (shopId) {
-      const items = await this.item.findAll({ where: { shopId } });
+      const items = await this.shopSaleLines(shopId);
       return { total: items.reduce((s, i) => s + Number(i.price) * i.quantity, 0), scope: "shop" };
     }
-    return { total: (await this.order.sum("total")) ?? 0, scope: "platform" };
+    return { total: await this.platformRevenue(), scope: "platform" };
   }
 
   /**
@@ -173,7 +187,7 @@ export class AnalyticsController {
     const shopId = this.managerShop(u);
     const shops = shopId ? await this.shop.findAll({ where: { id: shopId } }) : await this.shop.findAll();
     return Promise.all(shops.map(async (s) => {
-      const items = await this.item.findAll({ where: { shopId: s.id } });
+      const items = await this.shopSaleLines(s.id);
       const revenue = items.reduce((sum, i) => sum + Number(i.price) * i.quantity, 0);
       const shipmentsCount = await this.ship.count({ where: { shopId: s.id } });
       return {

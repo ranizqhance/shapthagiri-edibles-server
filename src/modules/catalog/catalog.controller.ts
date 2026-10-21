@@ -4,15 +4,16 @@ import { InjectModel } from "@nestjs/sequelize";
 import { Sequelize, Op, QueryTypes } from "sequelize";
 import { Brand, Category, Product, ProductMedia, ProductVariant, ShopInventory, Shop, StockMovement, AuditLog } from "@/models";
 import { recordAudit, normalizeIp } from "@/common/utils/audit.util";
-import { NotFoundException } from "@/common/errors/http";
-import { RequirePermissions } from "@/common/decorators/permissions.decorator";
+import { ConflictException, ForbiddenException, NotFoundException } from "@/common/errors/http";
+import { WILDCARD_PERMISSION } from "@/modules/rbac/rbac.catalog";
+import { RequirePermissions, RequireAnyPermission } from "@/common/decorators/permissions.decorator";
 import { Public } from "@/common/decorators/public.decorator";
 import { Role } from "@/common/enums/role.enum";
 import { CurrentUser } from "@/common/decorators/current-user.decorator";
 import { JwtPayload } from "@/modules/auth/jwt.strategy";
 import { PageOptionsDto } from "@/common/dto/page-options.dto";
 import { paginate, findOr404, findByIdOrSlugOr404 } from "@/common/utils/crud.util";
-import { BrandDto, CategoryDto, UpdateCategoryDto, CompareDto, MediaDto, ProductDto, VariantDto } from "@/common/dto/common.dto";
+import { BrandDto, UpdateBrandDto, CategoryDto, UpdateCategoryDto, CompareDto, MediaDto, ProductDto, VariantDto } from "@/common/dto/common.dto";
 import { NotificationsService } from "../notifications/notifications.service";
 import { CacheService } from "../../services/cache.service";
 import { CategoriesService } from "@/modules/catalog/categories.service";
@@ -30,6 +31,17 @@ import {
   visibleProductClause,
   isValidShopId,
 } from "./availability";
+
+/** The shop to name as the seller: cheapest in-stock row, else any row. */
+function sellerOf(inventory: ShopInventory[], variants: ProductVariant[]): { id: string; name: string } | null {
+  const priced = inventory
+    .filter((r) => r.quantity > 0 && (r as any).shop)
+    .map((r) => ({ r, p: Number(r.priceOverride ?? variants.find((v) => v.id === r.variantId)?.defaultPrice ?? 0) }))
+    .sort((a, b) => a.p - b.p);
+  const row = priced[0]?.r ?? inventory.find((r) => (r as any).shop);
+  const shop = (row as any)?.shop;
+  return shop ? { id: shop.id, name: shop.name } : null;
+}
 
 @ApiTags("Catalog")
 @Controller("catalog")
@@ -176,7 +188,8 @@ export class CatalogController {
   }
 
   @ApiBearerAuth()
-  @RequirePermissions('products.manageVariants')
+  @RequirePermissions()
+  @RequireAnyPermission('products.manageVariants', 'products.view', 'coupons.view', 'marketing.view', 'inventory.view')
   @Get("variants/search")
   async searchVariants(@Query() opts: PageOptionsDto) {
     const where: any = {};
@@ -246,7 +259,32 @@ export class CatalogController {
     this.cacheService.set("catalog:brands", rows);
     return rows;
   }
-  @ApiBearerAuth() @RequirePermissions('brands.create') @Post("brands") createBrand(@Body() b: BrandDto) { return this.brand.create(b as any); }
+  @ApiBearerAuth() @RequirePermissions('brands.create') @Post("brands") async createBrand(@CurrentUser() u: JwtPayload, @Ip() ip: string, @Body() b: BrandDto) {
+    const created = await this.brand.create(b as any);
+    await recordAudit(this.audit, { actorId: u?.sub, action: "brand_created", entity: "Brand", entityId: created.id, after: { name: created.name }, ip: normalizeIp(ip) });
+    this.invalidateStorefrontCaches();
+    return created;
+  }
+
+  @ApiBearerAuth() @RequirePermissions('brands.edit') @Patch("brands/:id") async updateBrand(@CurrentUser() u: JwtPayload, @Ip() ip: string, @Param("id") id: string, @Body() b: UpdateBrandDto) {
+    const brand = await findOr404<Brand>(this.brand, id, "Brand");
+    const before = { name: brand.name, slug: brand.slug, logoUrl: brand.logoUrl };
+    await brand.update(b as any);
+    await recordAudit(this.audit, { actorId: u?.sub, action: "brand_updated", entity: "Brand", entityId: id, before, after: b, ip: normalizeIp(ip) });
+    this.invalidateStorefrontCaches();
+    return brand;
+  }
+
+  /** Refused while products still carry the brand — move them first. */
+  @ApiBearerAuth() @RequirePermissions('brands.delete') @Delete("brands/:id") async deleteBrand(@CurrentUser() u: JwtPayload, @Ip() ip: string, @Param("id") id: string) {
+    const brand = await findOr404<Brand>(this.brand, id, "Brand");
+    const inUse = await this.product.count({ where: { brandId: id } });
+    if (inUse) throw new ConflictException(undefined, `${brand.name} is on ${inUse} product${inUse === 1 ? "" : "s"} — move ${inUse === 1 ? "it" : "them"} to another brand first.`);
+    await brand.destroy();
+    await recordAudit(this.audit, { actorId: u?.sub, action: "brand_deleted", entity: "Brand", entityId: id, before: { name: brand.name }, ip: normalizeIp(ip) });
+    this.invalidateStorefrontCaches();
+    return { deleted: true };
+  }
 
   @Public() @Get("products") async products(
     @Query() opts: PageOptionsDto,
@@ -287,6 +325,8 @@ export class CatalogController {
         separate: true,
         order: [["sortOrder", "ASC"], ["createdAt", "ASC"]],
       },
+      // The product's own brand (Pooram, Sun Classic, …) for the card's brand line.
+      { model: this.brand, attributes: ["id", "name"] },
     ];
     // The storefront visibility gate. A product with no active inventory row
     // anywhere is off the shop floor entirely — that is what the Inventory
@@ -330,7 +370,7 @@ export class CatalogController {
     } else if (categoryId) {
       // Match products DIRECTLY assigned to the given category only — do not
       // roll up descendant categories. A product assigned to a sub-category such as
-      // "Mango Pickles" appears under "Mango Pickles", never under its parent "Pickles".
+      // "Roasted Coconut Oil" appears under "Roasted Coconut Oil", never under its parent "Coconut Oil".
       const categoryIdList = categoryId.split(',').map(s => s.trim()).filter(Boolean);
       where.categoryId = { [Op.in]: categoryIdList };
     }
@@ -389,9 +429,9 @@ export class CatalogController {
 
     // Rank search results by WHERE the term matched.
     //
-    // Descriptions carry ingredient lists, so a match there is far weaker than a
-    // match in the name: searching "powder" hit a mango pickle whose recipe
-    // mentions chilli powder, and it sorted alongside the actual powders.
+    // Descriptions carry usage notes, so a match there is far weaker than a
+    // match in the name: searching "hair oil" would otherwise rank a cooking
+    // oil whose description mentions hair care alongside the actual hair oils.
     // Title first, then subtitle, then everything the OR above allows.
     if (opts.q && (!opts.sortBy || opts.sortBy === "relevance")) {
       const esc = (v: string) => (this.product as any).sequelize.escape(v);
@@ -477,7 +517,7 @@ export class CatalogController {
     if (categoryId) {
       // Match products DIRECTLY assigned to the given category only — do not
       // roll up descendant categories. A product assigned to a sub-category such as
-      // "Mango Pickles" appears under "Mango Pickles", never under its parent "Pickles".
+      // "Roasted Coconut Oil" appears under "Roasted Coconut Oil", never under its parent "Coconut Oil".
       const categoryIdList = categoryId.split(',').map(s => s.trim()).filter(Boolean);
       where.categoryId = { [Op.in]: categoryIdList };
     }
@@ -529,6 +569,7 @@ export class CatalogController {
 
   @Public() @Get("products/:id") async productDetail(@Param("id") id: string, @Query("shopId") shopId?: string) {
     const product = await findByIdOrSlugOr404<Product>(this.product, id, "Product");
+    const brand = product.brandId ? await this.brand.findByPk(product.brandId, { attributes: ["id", "name"] }) : null;
     const variants = await this.variant.findAll({ where: { productId: product.id } });
     const media = await this.media.findAll({
       where: { productId: product.id },
@@ -546,6 +587,9 @@ export class CatalogController {
       include: [{
         model: Shop,
         as: "shop",
+        // Public endpoint: the shop's name and town only — never its contact
+        // details, manager or delivery settings.
+        attributes: ["id", "name", "city", "state"],
         where: { isActive: true },
         required: true,
       }],
@@ -612,7 +656,7 @@ export class CatalogController {
     const soldCount = Number(soldRows?.[0]?.sold ?? 0);
 
     return {
-      product: { ...product.toJSON(), rating: ratingSummary.average, reviewCount: ratingSummary.count, soldCount },
+      product: { ...product.toJSON(), brand: brand?.toJSON() ?? null, rating: ratingSummary.average, reviewCount: ratingSummary.count, soldCount },
       variants: variantsWithInv,
       media,
       totalStock,
@@ -627,6 +671,9 @@ export class CatalogController {
       // Tells the storefront the price/stock above are scoped to the serving shop.
       shopScoped: validShopId,
       shopId: validShopId ? shopId : null,
+      // Who sells it: the serving shop when scoped, else the shop with the best
+      // in-stock price. Buy Now carries this into checkout's summary.
+      shop: sellerOf(inventory, variants),
     };
   }
 
@@ -696,6 +743,13 @@ export class CatalogController {
     this.invalidateStorefrontCaches();
     const { shopId, shopIds, sku, defaultPrice, mrp, policy, _hasCombinations, baseStock, ...productData } = b as any;
     const before = await this.product.findByPk(id);
+    // Going live is an approval step: editors without approve/publish rights cannot flip a product to published.
+    if (productData.status === "published" && before?.status !== "published") {
+      const held = (u as any).permissions ?? [];
+      if (!["products.approve", "products.publish", WILDCARD_PERMISSION].some((k) => held.includes(k))) {
+        throw new ForbiddenException("FORBIDDEN", "Publishing a product needs approval");
+      }
+    }
     await this.product.update(productData, { where: { id } });
     await recordAudit(this.audit, {
       actorId: u.sub, action: "product_updated", entity: "Product", entityId: id,

@@ -1,4 +1,4 @@
-import { Injectable, Module } from "@nestjs/common";
+import { Injectable, Module, OnModuleInit } from "@nestjs/common";
 import { ConnectedSocket, MessageBody, OnGatewayConnection, OnGatewayDisconnect, SubscribeMessage, WebSocketGateway, WebSocketServer } from "@nestjs/websockets";
 import { InjectModel, SequelizeModule } from "@nestjs/sequelize";
 import { Server, Socket } from "socket.io";
@@ -7,14 +7,15 @@ import { env } from "@/config/env";
 import { logger } from "@/common/utils/logger";
 import { Role } from "@/common/enums/role.enum";
 import { JwtPayload } from "@/modules/auth/jwt.strategy";
-import { DeliveryAssignment, DeliveryLocationPing, DeliveryPartner, Order, OrderShipment } from "@/models";
+import { DeliveryAssignment, DeliveryLocationPing, DeliveryPartner, Order, OrderShipment, OrderStatusHistory } from "@/models";
+import { expandCorsOrigins } from "@/common/utils/cors-origins.util";
 import { ShipmentAccessModule, ShipmentAccessService } from "@/common/services/shipment-access.service";
 
 const STAFF_ROLES = [Role.ADMIN, Role.OPERATIONS, Role.SUPPORT];
 
 @Injectable()
-@WebSocketGateway({ cors: { origin: env.CORS_ORIGINS.split(",").map((s) => s.trim()), credentials: true } })
-export class TrackingGateway implements OnGatewayConnection, OnGatewayDisconnect {
+@WebSocketGateway({ cors: { origin: expandCorsOrigins(env.CORS_ORIGINS), credentials: true } })
+export class TrackingGateway implements OnGatewayConnection, OnGatewayDisconnect, OnModuleInit {
   @WebSocketServer() server!: Server;
 
   constructor(
@@ -25,6 +26,24 @@ export class TrackingGateway implements OnGatewayConnection, OnGatewayDisconnect
     @InjectModel(DeliveryLocationPing) private ping: typeof DeliveryLocationPing,
     private access: ShipmentAccessService,
   ) {}
+
+  /**
+   * Every shipment status change — shop accept/pack/dispatch, partner
+   * pickup/deliver/fail, cancellations — writes one history row naming the
+   * shipment. Pushing from that row reaches the order pages' live view
+   * (`shipment:status`) once per real change, without each of those handlers
+   * having to remember to.
+   */
+  onModuleInit() {
+    OrderStatusHistory.onShipmentStatus = (row) => {
+      this.server?.to(`shipment:${row.shipmentId}`).emit("shipment:status", {
+        shipmentId: row.shipmentId,
+        orderId: row.orderId,
+        status: row.status,
+        ts: Date.now(),
+      });
+    };
+  }
 
   /** Reject any socket that does not present a valid access token. */
   handleConnection(socket: Socket) {
@@ -108,11 +127,20 @@ export class TrackingGateway implements OnGatewayConnection, OnGatewayDisconnect
     if (!me) return;
     await me.update({ currentLat: data.lat, currentLng: data.lng });
     await this.ping.create({ partnerId: me.id, lat: data.lat, lng: data.lng } as any);
+    await this.broadcastPartnerLocation(me.id, data.lat, data.lng);
+  }
 
-    const at = { partnerId: me.id, lat: data.lat, lng: data.lng, ts: Date.now() };
+  /**
+   * Fan a rider's position out to whoever may watch it. Shared by the socket
+   * ping above and the partner app's HTTP ping (POST partners/me/ping), which
+   * used to store the position and tell nobody.
+   */
+  async broadcastPartnerLocation(partnerId: string, lat: number, lng: number) {
+    if (!this.server) return;
+    const at = { partnerId, lat, lng, ts: Date.now() };
 
     // The partner room, for anyone watching this rider specifically (ops).
-    this.server.to(`partner:${me.id}`).emit("partner:location", at);
+    this.server.to(`partner:${partnerId}`).emit("partner:location", at);
 
     // And the room for each shipment they are currently carrying.
     //
@@ -126,7 +154,7 @@ export class TrackingGateway implements OnGatewayConnection, OnGatewayDisconnect
     // (delivery.model.ts) — the rider is on the way, so the customer's map
     // should move.
     const carrying = await this.assign.findAll({
-      where: { partnerId: me.id, status: ["accepted", "picked"] as any },
+      where: { partnerId, status: ["accepted", "picked"] as any },
       attributes: ["shipmentId"],
     });
     for (const a of carrying) {
