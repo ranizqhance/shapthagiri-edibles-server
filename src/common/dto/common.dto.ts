@@ -164,7 +164,7 @@ export class VariantDto {
 
 export class MediaDto {
   @ApiPropertyOptional() @IsOptional() @IsUUID() variantId?: string;
-  @ApiProperty({ example: "/packs/pooram-1ltr.webp" }) @IsString() url!: string;
+  @ApiProperty({ example: "https://general-qts-public.s3.us-east-1.amazonaws.com/products/<uuid>.webp" }) @IsString() url!: string;
   @ApiProperty({ example: "image" }) @IsString() type!: string;
   @ApiPropertyOptional() @IsOptional() @IsInt() sortOrder?: number;
 }

@@ -66,7 +66,7 @@ async function seedRbac() {
 
 type SeedLine = { brand: "pooram" | "dhwani"; name: string; subtitle: string; description: string; specs: Record<string, string>; tags: string[] };
 
-// The two brands, worded as on the company's own website (ecommerce-web/assets/CONTENT.md).
+// The two brands, worded as on the company's own website (CONTENT.md in the old-website archive on S3).
 const POORAM: SeedLine = {
   brand: "pooram",
   name: "Pooram Coconut Oil",
@@ -86,8 +86,22 @@ const DHWANI: SeedLine = {
   tags: ["dhwani", "pure", "coconut oil", "hair oil"],
 };
 
+/** The pack photos, on S3 (uploaded through the API's upload service), keyed by pack. */
+const PACK_IMAGES: Record<string, string> = {
+  "pooram-1ltr": "https://general-qts-public.s3.us-east-1.amazonaws.com/products/93f33248-c80c-4d94-8f47-b631988c54b6.webp",
+  "pooram-500ml": "https://general-qts-public.s3.us-east-1.amazonaws.com/products/4c247253-9a54-4e79-b768-686a231619d2.webp",
+  "pooram-250ml": "https://general-qts-public.s3.us-east-1.amazonaws.com/products/0e0b4055-ae79-4ec1-9b5f-50a4680555bf.webp",
+  "pooram-1ltr-pet-bottle": "https://general-qts-public.s3.us-east-1.amazonaws.com/products/eb249bea-61fd-493a-ad3d-c57a7c567b54.webp",
+  "pooram-500ml-pet-bottle": "https://general-qts-public.s3.us-east-1.amazonaws.com/products/826f175c-a6cc-4da2-81d0-15e9e9f0e12b.webp",
+  "pooram-1ltr-hdpe-bottle": "https://general-qts-public.s3.us-east-1.amazonaws.com/products/21ddaa6b-4fc9-4b72-8657-568f25a6a550.webp",
+  "pooram-500ml-hdpe-bottle": "https://general-qts-public.s3.us-east-1.amazonaws.com/products/9bec754a-bb43-42db-9d26-fec83d1d4010.webp",
+  "pooram-5ltr": "https://general-qts-public.s3.us-east-1.amazonaws.com/products/0aa3c817-d695-4660-85c0-0dfd4f26f5f7.webp",
+  "dhw-1ltr": "https://general-qts-public.s3.us-east-1.amazonaws.com/products/dbd0047e-73b5-498b-823b-a2da790c82c7.webp",
+  "dhw-500ml": "https://general-qts-public.s3.us-east-1.amazonaws.com/products/ff1edda9-08e9-4d0b-87d7-7fec16672bf0.webp",
+};
+
 type SeedPack = {
-  /** File name under the storefront's public/packs/, and the SKU stem. */
+  /** Key of the pack photo in PACK_IMAGES, and the SKU stem. */
   key: string;
   line: SeedLine;
   size: string;
@@ -266,7 +280,7 @@ async function seed() {
   /* ───────────────────────── Catalogue ───────────────────────── */
   const [category] = await Category.findOrCreate({
     where: { slug: "coconut-oil" },
-    defaults: { name: "Coconut Oil", slug: "coconut-oil", imageUrl: "/packs/pooram-1ltr.webp", sortOrder: 0, isActive: true } as any,
+    defaults: { name: "Coconut Oil", slug: "coconut-oil", imageUrl: PACK_IMAGES["pooram-1ltr"], sortOrder: 0, isActive: true } as any,
   });
 
   const brandIds = new Map<string, string>();
@@ -293,7 +307,7 @@ async function seed() {
   for (const [i, p] of PACKS.entries()) {
     const title = packTitle(p);
     const sku = packSku(p);
-    const image = `/packs/${p.key}.webp`;
+    const image = PACK_IMAGES[p.key];
     const [product] = await Product.findOrCreate({
       where: { slug: slugify(title) },
       defaults: {

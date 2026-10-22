@@ -4,7 +4,7 @@
  * Every customer-facing document the API renders (emails, the tax invoice,
  * settlement statements, finance reports, API docs) reads its name, contact
  * details and colours from here, so a rebrand is this file. Facts come from
- * the company's own material (ecommerce-web/assets/CONTENT.md) and match the
+ * the company's own material (CONTENT.md in the old-website archive on S3, shapthagiri-archive/old-website/) and match the
  * storefront's `lib/brand.ts`; the palette is the storefront's oil theme.
  *
  * GSTIN / FSSAI are not public yet: they live in the `business.gst` /
