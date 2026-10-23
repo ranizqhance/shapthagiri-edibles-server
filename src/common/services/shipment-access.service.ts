@@ -3,9 +3,7 @@ import { InjectModel, SequelizeModule } from "@nestjs/sequelize";
 import { DeliveryAssignment, DeliveryPartner, Order, OrderShipment } from "@/models";
 import { Role } from "@/common/enums/role.enum";
 import { JwtPayload } from "@/modules/auth/jwt.strategy";
-
-/** Roles that may see any shipment on the platform. */
-const STAFF_ROLES = [Role.ADMIN, Role.OPERATIONS, Role.SUPPORT];
+import { hasPermission } from "@/common/utils/permission.util";
 
 /**
  * Who may see, and who may act on, a shipment.
@@ -36,21 +34,21 @@ export class ShipmentAccessService {
 
   /** May this caller READ the shipment? */
   async canView(u: JwtPayload, shipmentId: string): Promise<boolean> {
-    if (STAFF_ROLES.includes(u.role)) return true;
-
     const shipment = await this.ship.findByPk(shipmentId);
     if (!shipment) return false;
 
-    if (u.role === Role.SHOP_MANAGER) return shipment.shopId === u.shopId;
+    // Shop-scoped staff see their own shop, whatever else they hold.
+    if (u.role === Role.SHOP_MANAGER || u.shopId) return !!u.shopId && shipment.shopId === u.shopId;
+    // Platform staff: judged by RBAC permission, not by the legacy role enum.
+    // Every custom role is stored with the enum value `support`, so the old
+    // role list let any custom role see every shipment on the platform.
+    if (hasPermission(u, "fulfillment.view", "orders.view")) return true;
 
-    if (u.role === Role.CUSTOMER) {
-      const order = await this.order.findByPk(shipment.orderId);
-      return !!order && order.userId === u.sub;
-    }
-
-    if (u.role === Role.DELIVERY_PARTNER) return this.isAssigned(u, shipmentId);
-
-    return false;
+    // The customer who ordered it, and the rider assigned to it — by fact, not
+    // by role.
+    const order = await this.order.findByPk(shipment.orderId, { attributes: ["id", "userId"] });
+    if (order && order.userId === u.sub) return true;
+    return this.isAssigned(u, shipmentId);
   }
 
   /**
@@ -64,16 +62,12 @@ export class ShipmentAccessService {
    * coordinates.
    */
   async canAct(u: JwtPayload, shipmentId: string): Promise<boolean> {
-    if (STAFF_ROLES.includes(u.role)) return true;
-
-    if (u.role === Role.SHOP_MANAGER) {
-      const shipment = await this.ship.findByPk(shipmentId);
-      return !!shipment && shipment.shopId === u.shopId;
+    if (u.role === Role.SHOP_MANAGER || u.shopId) {
+      const shipment = await this.ship.findByPk(shipmentId, { attributes: ["id", "shopId"] });
+      return !!shipment && !!u.shopId && shipment.shopId === u.shopId;
     }
-
-    if (u.role === Role.DELIVERY_PARTNER) return this.isAssigned(u, shipmentId);
-
-    return false;
+    if (hasPermission(u, "fulfillment.ship")) return true;
+    return this.isAssigned(u, shipmentId);
   }
 
   private async isAssigned(u: JwtPayload, shipmentId: string): Promise<boolean> {

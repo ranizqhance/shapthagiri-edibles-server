@@ -5,6 +5,8 @@
  * brand itself comes from common/brand.ts.
  */
 
+// Shared cell writer: quoted, and typed text cannot run as a spreadsheet formula.
+import { csvCell } from "@/common/utils/csv.util";
 import { BRAND } from "../brand";
 
 export interface ReportSummaryItem { label: string; value: string }
@@ -76,10 +78,6 @@ export function cronFromSchedule(spec: ScheduleSpec): string {
 
 /* ───────────────── CSV ───────────────── */
 
-const csvCell = (v: unknown): string => {
-  const s = String(v ?? "");
-  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-};
 
 export function toCsv(table: ReportTable): string {
   const head = table.columns.map(csvCell).join(",");

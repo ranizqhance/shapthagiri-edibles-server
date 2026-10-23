@@ -7,6 +7,10 @@ import { BadRequestException, NotFoundException, ForbiddenException, ConflictExc
 import { WILDCARD_PERMISSION } from "./rbac.catalog";
 import { RbacCacheService } from "./rbac-cache.service";
 import { RbacAuditService, AuditContext } from "./rbac-audit.service";
+import { assertCanGrant } from "@/common/utils/permission.util";
+
+/** The acting user, for grant checks; null for internal (non-request) callers. */
+const actorOf = (ctx: AuditContext) => (ctx.actorPermissions === undefined ? null : { permissions: ctx.actorPermissions });
 
 /** Permissions that must never be stripped from your OWN active role (anti-lockout). */
 const SELF_LOCK_KEYS = ["roles.view", "roles.edit"];
@@ -102,6 +106,7 @@ export class RbacService {
   // ──────────────────────────── Mutations ───────────────────────────
 
   async createRole(dto: { name: string; description?: string; permissions?: string[] }, ctx: AuditContext) {
+    if (actorOf(ctx) && dto.permissions?.length) assertCanGrant(actorOf(ctx), dto.permissions);
     const key = await this.uniqueKey(dto.name);
     const role = await this.roleModel.create({
       key,
@@ -160,6 +165,7 @@ export class RbacService {
     }
 
     const requested = Array.from(new Set(keys.filter((k) => k && k !== WILDCARD_PERMISSION)));
+    if (actorOf(ctx)) assertCanGrant(actorOf(ctx), requested);
 
     // Anti-lockout: don't let admins strip their own ability to manage roles.
     if (await this.isActorsRole(ctx.actorId, id)) {
@@ -185,6 +191,8 @@ export class RbacService {
       include: [{ model: this.permModel, through: { attributes: [] }, required: false }],
     });
     if (!source) throw new NotFoundException("NOT_FOUND", "Role not found");
+    // A copy grants everything the source does; same rule as granting directly.
+    if (actorOf(ctx)) assertCanGrant(actorOf(ctx), (source.permissions ?? []).map((p) => p.key));
 
     const name = dto.name?.trim() || `${source.name} (Copy)`;
     const key = await this.uniqueKey(name);
@@ -229,6 +237,15 @@ export class RbacService {
     if (!user) throw new NotFoundException("NOT_FOUND", "User not found");
 
     const before = { roleId: user.roleId, role: user.role };
+
+    // Nobody re-roles an account more privileged than themselves, or hands out
+    // a role holding permissions they lack — assigning was checked, what was
+    // assigned was not, so the permission to assign roles meant super_admin.
+    const actor = actorOf(ctx);
+    if (actor) {
+      assertCanGrant(actor, (await this.cache.getPermissionsForUser(user)).permissions);
+      if (roleId) assertCanGrant(actor, await this.cache.getPermissionsForRole(roleId));
+    }
 
     if (!roleId) {
       // Revert to the legacy enum-derived role (the BeforeUpdate hook re-resolves it).

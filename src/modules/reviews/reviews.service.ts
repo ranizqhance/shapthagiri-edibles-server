@@ -11,6 +11,7 @@ import { JwtPayload } from "@/modules/auth/jwt.strategy";
 import { Role } from "@/common/enums/role.enum";
 import { OrderStatus } from "@/common/enums/order-status.enum";
 import { BadRequestException, ForbiddenException, NotFoundException, ConflictException } from "@/common/errors/http";
+import { shopScope } from "@/common/utils/permission.util";
 import { PageOptionsDto } from "@/common/dto/page-options.dto";
 import { paginate } from "@/common/utils/crud.util";
 import { NotificationsService } from "@/modules/notifications/notifications.service";
@@ -457,9 +458,12 @@ export class ReviewsService {
     const shipment = await OrderShipment.findByPk(shipmentId, { include: [Order] });
     if (!shipment) throw new NotFoundException("NOT_FOUND", "Shipment not found");
 
+    // Only the customer who received it — whatever the caller's role. This used
+    // to test role === CUSTOMER, so any other account could rate (and thereby
+    // move the rating of) any delivery partner's shipment.
     const ownerId = (shipment as any).order?.userId;
-    if (user.role === Role.CUSTOMER && ownerId !== user.sub) {
-      throw new ForbiddenException("AUTH_FORBIDDEN", "You can only review your own delivery");
+    if (ownerId !== user.sub) {
+      throw new NotFoundException("NOT_FOUND", "Shipment not found");
     }
     if (![OrderStatus.DELIVERED, OrderStatus.COMPLETED].includes(shipment.status as any)) {
       throw new BadRequestException("VALIDATION_FAILED", "This shipment has not been delivered yet");
@@ -495,6 +499,11 @@ export class ReviewsService {
   async listDeliveryReviews(user: JwtPayload, opts: PageOptionsDto, filters: { partnerId?: string } = {}) {
     const where: any = {};
     if (filters.partnerId) where.partnerId = filters.partnerId;
+    // A shop account sees reviews of its own shop's deliveries only.
+    const shop = shopScope(user);
+    if (shop) {
+      where.shipmentId = { [Op.in]: this.sequelize.literal(`(SELECT id FROM order_shipments WHERE "shopId" = ${this.sequelize.escape(shop)})`) };
+    }
     return await paginate(this.deliveryReviews, opts, where, []);
   }
 }

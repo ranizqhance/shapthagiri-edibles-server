@@ -4,6 +4,13 @@ import { logger } from "@/common/utils/logger";
 import { BRAND } from "@/common/brand";
 import { EmailProviderException } from "@/common/errors/integration";
 
+/**
+ * Connect, greeting and idle-socket limits for SMTP. nodemailer's defaults are
+ * minutes long; a slow or blackholed mail server held each send (and the
+ * request or job waiting on it) for that long.
+ */
+const SMTP_TIMEOUTS = { connectionTimeout: 10_000, greetingTimeout: 10_000, socketTimeout: 30_000 };
+
 export class EmailProvider {
   private transporter: Transporter | null = null;
   /** Logged once, not per send — a warning on every email is just noise. */
@@ -23,6 +30,7 @@ export class EmailProvider {
         // real secret is the 16 characters without the spaces, so strip them
         // rather than fail a login that looks correct to whoever set it.
         auth: { user: env.GMAIL_USER, pass: env.GMAIL_APP_PASSWORD.replace(/\s+/g, "") },
+        ...SMTP_TIMEOUTS,
       });
       this.verifyOnce(`gmail, ${env.GMAIL_USER}`);
       return this.transporter;
@@ -38,6 +46,7 @@ export class EmailProvider {
       port: env.MAIL_PORT,
       secure: env.MAIL_SECURE,
       auth: { user: env.MAIL_USER, pass: env.MAIL_PASS },
+      ...SMTP_TIMEOUTS,
     });
     this.verifyOnce(`smtp, ${env.MAIL_HOST}:${env.MAIL_PORT}`);
     return this.transporter;

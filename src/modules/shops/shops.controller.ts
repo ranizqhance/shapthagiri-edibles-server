@@ -1,3 +1,5 @@
+import { Throttle } from "@nestjs/throttler";
+import { LIMITS } from "@/common/security/throttle";
 import { Body, Controller, Get, Param, Patch, Post, Query, Delete, Headers } from "@nestjs/common";
 import jwt from "jsonwebtoken";
 import { env } from "@/config/env";
@@ -194,6 +196,7 @@ export class ShopsController {
    * nothing is in range, so the caller can fall back to the full catalog.
    * Declared before any ":id" route so the literal path wins.
    */
+  @Throttle(LIMITS.search)
   @Public()
   @Get("nearest")
   async nearest(@Query("lat") lat?: string, @Query("lng") lng?: string) {
@@ -229,6 +232,7 @@ export class ShopsController {
    * pinned coordinates. Returns { coords: null } on no match. Declared before
    * any ":id" route so the literal path wins.
    */
+  @Throttle(LIMITS.search)
   @Public()
   @Get("geocode")
   async geocode(@Query("q") q?: string) {
@@ -242,6 +246,7 @@ export class ShopsController {
    * nothing covers — before the customer commits to it.
    * Declared before any ":id" route so the literal path wins.
    */
+  @Throttle(LIMITS.search)
   @Public()
   @Get("geocode/search")
   async geocodeSearch(@Query("q") q?: string) {
@@ -269,6 +274,7 @@ export class ShopsController {
    * Coordinates → human address, so "Use current location" can show the customer
    * where they are rather than a raw lat/lng.
    */
+  @Throttle(LIMITS.search)
   @Public()
   @Get("reverse-geocode")
   async reverseGeocode(@Query("lat") lat?: string, @Query("lng") lng?: string) {

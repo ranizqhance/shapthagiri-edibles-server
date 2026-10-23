@@ -3,13 +3,14 @@ import { Injectable, NotFoundException, ForbiddenException, BadRequestException 
 // App error classes render as proper 4xx (the global filter renders raw Nest
 // HttpExceptions as 500). Used for the partial-return validation paths so the
 // customer sees the real reason ("You can return at most N more units").
-import { BadRequestException as AppBadRequestException, NotFoundException as AppNotFoundException, ForbiddenException as AppForbiddenException } from '@/common/errors/http';
+import { BadRequestException as AppBadRequestException, NotFoundException as AppNotFoundException, ForbiddenException as AppForbiddenException, ConflictException as AppConflictException } from '@/common/errors/http';
 import { InjectModel, InjectConnection } from '@nestjs/sequelize';
 import { Sequelize } from 'sequelize-typescript';
 import { Return, ReturnMedia, Exchange, OrderItem, User, ShopInventory, StockMovement, Order, OrderShipment, ProductVariant, Product, AuditLog, Brand, PaymentRefund, Payment, InventoryReservation, ProductMedia } from '@/models';
 import { JwtPayload } from '@/modules/auth/jwt.strategy';
 import { Role } from '@/common/enums/role.enum';
 import { OrderStatus } from '@/common/enums/order-status.enum';
+import { hasPermission } from '@/common/utils/permission.util';
 import { NotificationsService } from '@/modules/notifications/notifications.service';
 import { NotificationQueueService } from '@/modules/notifications/notification.queue';
 import { NotificationEventType } from '@/common/enums/notification-event.enum';
@@ -434,11 +435,13 @@ export class ReturnsService {
     });
     if (!item) throw new NotFoundException('Order item not found');
 
-    // Ownership: a customer may only open a return against their own order item.
-    // The Return is created with userId = caller, so without this check a caller
-    // could open (and then exchange/refund) a return on someone else's purchase.
-    if (user.role === Role.CUSTOMER && (item as any).shipment?.order?.userId !== user.sub) {
-      throw new ForbiddenException('AUTH_FORBIDDEN');
+    // Ownership: anyone without returns staff permission may only open a return
+    // against their own order item. The Return is created with userId = caller,
+    // so without this a caller could open (and then exchange/refund) a return on
+    // someone else's purchase. Judged by permission, not by role === CUSTOMER,
+    // which let every other role skip the check. "Not yours" reads as missing.
+    if (!hasPermission(user, 'returns.view') && (item as any).shipment?.order?.userId !== user.sub) {
+      throw new AppNotFoundException('NOT_FOUND', 'Order item not found');
     }
 
     const variant: any = item.variant;
@@ -514,8 +517,8 @@ export class ReturnsService {
         });
         if (!item) throw new AppNotFoundException('NOT_FOUND', `Order item ${line.orderItemId} not found`);
 
-        if (user.role === Role.CUSTOMER && (item as any).shipment?.order?.userId !== user.sub) {
-          throw new AppForbiddenException('AUTH_FORBIDDEN');
+        if (!hasPermission(user, 'returns.view') && (item as any).shipment?.order?.userId !== user.sub) {
+          throw new AppNotFoundException('NOT_FOUND', `Order item ${line.orderItemId} not found`);
         }
 
         const variant: any = item.variant;
@@ -695,6 +698,18 @@ export class ReturnsService {
     // bare findByPk, letting any manager confirm pickup on another shop's return.
     const ret = await this.assertReturnScope(user, returnId);
 
+    // Only forward moves out of the pickup stage. The status used to be written
+    // through as given, so this endpoint could set a return to any state at
+    // all — "refunded" included — skipping inspection and every money check.
+    const FROM: Record<string, string[]> = {
+      picked_up: ['approved', 'pickup_scheduled'],
+      received_at_shop: ['approved', 'pickup_scheduled', 'picked_up', 'picked'],
+    };
+    if (ret.status === status) return { success: true }; // a repeated click is not an error
+    if (!FROM[status]?.includes(ret.status)) {
+      throw new AppBadRequestException('BAD_REQUEST', `A return that is ${ret.status} cannot be marked ${status}.`);
+    }
+
     const exchange = await Exchange.findOne({ where: { returnId: ret.id } });
 
     await this.sequelize.transaction(async t => {
@@ -870,14 +885,18 @@ export class ReturnsService {
           const orderId = (item as any).shipment.orderId;
           const order = await Order.findByPk(orderId, { transaction: t });
           const effective = order ? await this.computeLineRefundable(order, item, retQty, t) : 0;
-          const refundAmount = this.round2(Math.max(0, effective - Number(deductRestockingFee || 0)));
+          // A restocking fee can only REDUCE a refund, and never below zero. It
+          // arrived unvalidated, so a negative fee was subtracted as a credit and
+          // pushed the refund past what the customer paid for the line.
+          const restockingFee = Math.min(Math.max(0, Number(deductRestockingFee) || 0), effective);
+          const refundAmount = this.round2(effective - restockingFee);
 
           await this.auditLogModel.create({
             actorId: user.sub,
             action: 'Refund Requested',
             entity: 'Return',
             entityId: ret.id,
-            after: { refundAmount, destination: 'WALLET', restockingFee: deductRestockingFee },
+            after: { refundAmount, destination: 'WALLET', restockingFee },
           } as any, { transaction: t });
 
           const userId = ret.userId; const rid = ret.id; const shopId = item.shopId;
@@ -1069,11 +1088,34 @@ export class ReturnsService {
       }
     }
 
+    // A replacement is a swap for what is coming back — nothing more. Each of
+    // these was open: an exchange on a rejected or already-refunded return, a
+    // second exchange on the same return, more units than were returned, and a
+    // "replacement" that was any variant of any product at any price.
+    if (['rejected', 'refunded', 'refund_processing', 'closed', 'inspection_failed'].includes(ret.status)) {
+      throw new AppBadRequestException('BAD_REQUEST', `This return is ${ret.status} and can no longer be exchanged.`);
+    }
+    if (await Exchange.findOne({ where: { returnId: ret.id }, attributes: ['id'] })) {
+      throw new AppConflictException('CONFLICT', 'An exchange has already been requested for this return.');
+    }
+
     // Replacement quantity: default to the return's quantity (partial), then the
     // whole line for legacy returns with no quantity captured.
-    const replaceQty = data.quantity != null
-      ? Math.floor(Number(data.quantity))
-      : (ret.quantity == null ? Number(item?.quantity ?? 1) : Number(ret.quantity));
+    const returnedQty = ret.quantity == null ? Number(item?.quantity ?? 1) : Number(ret.quantity);
+    const replaceQty = data.quantity != null ? Math.floor(Number(data.quantity)) : returnedQty;
+    if (!(replaceQty >= 1 && replaceQty <= returnedQty)) {
+      throw new AppBadRequestException('BAD_REQUEST', `You can replace between 1 and ${returnedQty} unit(s) on this return.`);
+    }
+
+    if (data.replacementVariantId && data.replacementVariantId !== item?.variantId) {
+      const replacement = await ProductVariant.findByPk(data.replacementVariantId, { attributes: ['id', 'productId', 'defaultPrice'] });
+      if (!replacement || replacement.productId !== item?.variant?.productId) {
+        throw new AppBadRequestException('BAD_REQUEST', 'A replacement must be another pack of the same product.');
+      }
+      if (Number(replacement.defaultPrice) > Number(item?.unitPrice ?? 0)) {
+        throw new AppBadRequestException('BAD_REQUEST', 'A replacement cannot cost more than the item being returned.');
+      }
+    }
 
     if (data.replacementVariantId) {
       // Validate against the shop that actually fulfilled the item, not a
@@ -1108,8 +1150,8 @@ export class ReturnsService {
 
     // Ownership / tenancy scope.
     const ownerId = (item as any).shipment?.order?.userId;
-    if (user.role === Role.CUSTOMER && ownerId !== user.sub) {
-      throw new ForbiddenException('AUTH_FORBIDDEN');
+    if (!hasPermission(user, 'returns.view') && ownerId !== user.sub) {
+      throw new AppNotFoundException('NOT_FOUND', 'Order item not found');
     }
     if (user.role === Role.SHOP_MANAGER && item.shopId !== user.shopId) {
       throw new ForbiddenException('AUTH_FORBIDDEN');

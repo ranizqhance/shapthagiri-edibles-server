@@ -1,3 +1,5 @@
+import { Throttle } from "@nestjs/throttler";
+import { LIMITS } from "@/common/security/throttle";
 import { Body, Controller, Delete, Get, Param, Patch, Post, NotFoundException } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { InjectModel } from "@nestjs/sequelize";
@@ -8,9 +10,10 @@ import { JwtPayload } from "@/modules/auth/jwt.strategy";
 import { CartEmptyException } from "@/common/errors/domain";
 // App error class — the global filter renders raw NestJS HttpExceptions as 500.
 import { BadRequestException as ShopBadRequest } from "@/common/errors/http";
-import { CartAddDto, CartMergeDto, CartUpdateDto, CouponApplyDto, DeliveryModeDto } from "@/common/dto/common.dto";
+import { CartAddDto, CartMergeDto, CartUpdateDto, CouponApplyDto, DeliveryModeDto, RepriceDto } from "@/common/dto/common.dto";
 import { ApplyGiftCardDto } from "@/common/dto/gift-card.dto";
 import { GiftCardService } from "@/modules/promotions/gift-card.service";
+import { GIFT_CARD_HOLDER_ATTRS } from "@/common/security/public-attributes";
 
 // A guest cart is a handful of lines; anything far beyond that is a forged
 // request trying to make the server price a catalogue inside one transaction.
@@ -51,7 +54,7 @@ export class CartController {
     // `giftCardId`, so an applied card was invisible in the summary (it showed
     // no discount and the full amount as payable) even though the backend
     // deducted it at placement.
-    return this.cart.findByPk(c.id, { include: [{ model: GiftCard, required: false }] }) as Promise<Cart>;
+    return this.cart.findByPk(c.id, { include: [{ model: GiftCard, required: false, attributes: GIFT_CARD_HOLDER_ATTRS }] }) as Promise<Cart>;
   }
 
   @Get()
@@ -292,6 +295,7 @@ export class CartController {
     return { removed: true };
   }
 
+  @Throttle(LIMITS.voucher)
   @Post("coupon")
   async applyCoupon(@CurrentUser() u: JwtPayload, @Body() body: CouponApplyDto) {
     const c = await this.getOrCreate(u.sub); await c.update({ couponCode: body.code }); return c;
@@ -314,7 +318,7 @@ export class CartController {
    * so the storefront can tell the customer what changed.
    */
   @Post("reprice")
-  async reprice(@CurrentUser() u: JwtPayload, @Body() body: { shopId?: string }) {
+  async reprice(@CurrentUser() u: JwtPayload, @Body() body: RepriceDto) {
     const cart = await this.getOrCreate(u.sub);
     const items = await this.item.findAll({ where: { cartId: cart.id } });
     const validShopId = !!body.shopId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(body.shopId);
@@ -349,6 +353,7 @@ export class CartController {
     return { valid: true, itemCount: items.length };
   }
 
+  @Throttle(LIMITS.voucher)
   @Post("gift-card")
   async applyGiftCard(@CurrentUser() u: JwtPayload, @Body() body: ApplyGiftCardDto) {
     const cart = await this.getOrCreate(u.sub);

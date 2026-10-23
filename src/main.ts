@@ -17,7 +17,7 @@ import { expandCorsOrigins } from "./common/utils/cors-origins.util";
 import { getFirebase } from "./config/firebase";
 import { ZoneCacheService } from "./modules/delivery-engine/zone-cache.service";
 import { RedisIoAdapter } from "./common/adapters/redis-io.adapter";
-import { auditRouteGates } from "./common/security/route-gates";
+import { auditRouteGates, registerSelfServiceHandlers } from "./common/security/route-gates";
 
 /**
  * class-validator errors -> [{ field, message }], keeping the dotted path for
@@ -85,7 +85,9 @@ function buildCorsOriginCheck(configured: string) {
     // not browser requests and CORS does not apply to them.
     if (!origin) return cb(null, true);
     if (allowed.has(origin.replace(/\/$/, ""))) return cb(null, true);
-    if (!rejected.has(origin)) {
+    // Logged once per origin — and the memory of which ones is bounded, since
+    // the Origin header is whatever the caller sends.
+    if (!rejected.has(origin) && rejected.size < 1_000) {
       rejected.add(origin);
       log.warn(`Blocked request from origin ${origin} — add it to CORS_ORIGINS if this is one of ours.`);
     }
@@ -157,19 +159,25 @@ async function bootstrap() {
    * HTTP Basic for the operator surfaces: the API docs and the Bull Board
    * queue dashboard.
    *
-   * Bull Board matters more than it looks. It is mounted as raw Express
-   * middleware (notifications.module.ts), and Nest guards only run on
-   * controller routes — so JwtAuthGuard, RolesGuard and PermissionsGuard never
-   * execute for it, and it sits outside the /api/v1 prefix. Anyone who could
-   * reach the path could read every queued job payload (customer emails,
-   * phones, order ids) and retry or delete jobs. It answers 404 publicly today
-   * only because Traefik does not route it, which is one proxy rule away from
-   * being untrue.
+   * Bull Board matters more than it looks. It is mounted as Nest middleware
+   * (notifications.module.ts), and guards only run on controller routes — so
+   * JwtAuthGuard, RolesGuard and PermissionsGuard never execute for it. Anyone
+   * who could reach the path could read every queued job payload (customer
+   * emails, phones, order ids) and retry or delete jobs.
+   *
+   * Nest prefixes middleware routes with the global prefix, so the board
+   * really lives under `${API_PREFIX}/admin/queues`; the bare path is kept
+   * too. Swagger also serves `/api/docs-yaml`, which `/api/docs` does not
+   * cover (Express matches path segments, not string prefixes) — it was the
+   * one copy of the API description left public.
    *
    * Applied in every environment, not just production: a dashboard that is
    * open locally is a dashboard someone eventually exposes.
    */
-  const OPERATOR_PATHS = ["/api/docs", "/api/docs-json", "/admin/queues"];
+  const OPERATOR_PATHS = [
+    "/api/docs", "/api/docs-json", "/api/docs-yaml",
+    "/admin/queues", `${env.API_PREFIX.replace(/\/+$/, "")}/admin/queues`,
+  ];
   app.use(OPERATOR_PATHS, (req: Request, res: Response, next: NextFunction) => {
     const header = req.headers.authorization ?? "";
     const [scheme, encoded] = header.split(" ");
@@ -259,6 +267,11 @@ async function bootstrap() {
    * self-service list stops the boot in production and is logged loudly
    * everywhere else.
    */
+  // PermissionsGuard enforces the same classification per request (deny by
+  // default); hand it the handlers before the first request can arrive.
+  const selfService = registerSelfServiceHandlers(app as unknown as { container: any });
+  new Logger("RouteGates").log(`${selfService} self-service route(s) registered; every other ungated route is denied`);
+
   const ungated = auditRouteGates(app as unknown as { container: any });
   if (ungated.length) {
     const list = ungated.map((r) => `${r.method} ${r.path} (${r.controller}.${r.handler})`);

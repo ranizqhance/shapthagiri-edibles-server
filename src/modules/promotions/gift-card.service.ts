@@ -15,6 +15,7 @@ import { CreateGiftCardDto, UpdateGiftCardDto, RechargeGiftCardDto, GiftCardStat
 import { withIdempotency } from "@/common/utils/idempotency.util";
 import { TrackingGateway } from "../tracking/tracking.gateway";
 import crypto from "node:crypto";
+import { GIFT_CARD_HOLDER_ATTRS } from "@/common/security/public-attributes";
 
 /**
  * This service used to throw Nest's built-in exceptions, which AllExceptionsFilter
@@ -327,8 +328,8 @@ export class GiftCardService {
   }
 
   async getMyGiftCards(customerId: string, query: { page?: number; limit?: number; status?: string; search?: string }): Promise<any> {
-    const page = Number(query.page) || 1;
-    const limit = Number(query.limit) || 20;
+    const page = Math.min(10_000, Math.max(1, Number(query.page) || 1));
+    const limit = Math.min(100, Math.max(1, Number(query.limit) || 20));
     const offset = (page - 1) * limit;
     
     const whereClause: any = { customerId };
@@ -347,7 +348,10 @@ export class GiftCardService {
 
     const { rows, count } = await this.giftCardModel.findAndCountAll({
       where: whereClause,
-      include: [{ model: GiftCardTransaction, as: "transactions" }],
+      // Holder-facing: card and its movements, without staff notes, actor ids
+      // or idempotency keys.
+      attributes: GIFT_CARD_HOLDER_ATTRS,
+      include: [{ model: GiftCardTransaction, as: "transactions", attributes: ["id", "type", "amount", "balanceAfter", "orderId", "createdAt"] }],
       limit,
       offset,
       order: [

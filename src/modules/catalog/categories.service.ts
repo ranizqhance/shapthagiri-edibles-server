@@ -89,9 +89,12 @@ export class CategoriesService {
    * active, in-stock inventory for — so a category card can never advertise
    * products the customer's shop cannot deliver. Without one it keeps the
    * original global count, which is what the admin catalog tree expects.
-   * `shopId` is validated as a UUID by the caller before it reaches here.
+   * `shopId` is interpolated into SQL below, so it is checked here as well as
+   * by the caller: safety that depends on every future call site remembering
+   * to validate is safety one refactor away from gone.
    */
   private productCountLiteral(shopId?: string) {
+    if (shopId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(shopId)) shopId = undefined;
     // Always storefront-scoped. Every consumer of `productCount` is a shopper
     // surface — the categories page, its banner and sidebar, the home accordion
     // and the filter drawer — so a count that included drafts and switched-off
@@ -127,8 +130,10 @@ export class CategoriesService {
     const qTrimmed = q?.trim();
     
     // Safely parse page and limit to handle NaN
-    const p = Number(page);
-    const l = Number(limit);
+    // Bounded like every other list: a client-chosen limit reached findAll
+    // with no ceiling.
+    const p = Math.min(Number(page), 10_000);
+    const l = Math.min(Number(limit), 100);
     const usePagination = !isNaN(p) && !isNaN(l) && p > 0 && l > 0;
     
     const offset = usePagination ? (p - 1) * l : undefined;

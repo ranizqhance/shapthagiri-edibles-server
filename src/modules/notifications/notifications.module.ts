@@ -7,7 +7,7 @@ import { CurrentUser } from "@/common/decorators/current-user.decorator";
 import { JwtPayload } from "@/modules/auth/jwt.strategy";
 import { PageOptionsDto } from "@/common/dto/page-options.dto";
 import { paginate } from "@/common/utils/crud.util";
-import { FcmTokenDto, SendNotificationDto, TemplateDto } from "@/common/dto/common.dto";
+import { FcmTokenDto, SendNotificationDto, TemplateDto, SnoozeDto, AssignInboxDto, InboxBulkDto, NotificationPrefsDto } from "@/common/dto/common.dto";
 import { NotificationsService, NotifyChannel } from "./notifications.service";
 import { NotificationQueueService } from "./notification.queue";
 import { SystemEventObserver } from "./system-event.observer";
@@ -196,7 +196,8 @@ export class NotificationsController {
   // --- Advanced Actions ---
 
   @Patch("inbox/:id/snooze")
-  async snoozeInboxItem(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body("durationMinutes") minutes: number) {
+  async snoozeInboxItem(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() snooze: SnoozeDto) {
+    const minutes = snooze.durationMinutes;
     const item = await this.inboxModel.findOne({ where: { id, userId: u.sub } });
     if (!item) throw new NotFoundException();
     const snoozeUntil = new Date(Date.now() + (minutes * 60000));
@@ -206,7 +207,8 @@ export class NotificationsController {
   }
 
   @Patch("inbox/:id/assign")
-  async assignInboxItem(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body("assignedTo") assignedTo: string) {
+  async assignInboxItem(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() assign: AssignInboxDto) {
+    const assignedTo = assign.assignedTo;
     const item = await this.inboxModel.findOne({ where: { id, userId: u.sub } });
     if (!item) throw new NotFoundException();
     await item.update({ assignedTo });
@@ -233,7 +235,7 @@ export class NotificationsController {
   }
 
   @Post("inbox/bulk")
-  async bulkOperations(@CurrentUser() u: JwtPayload, @Body() body: { action: 'markRead' | 'archive' | 'delete', ids: string[] }) {
+  async bulkOperations(@CurrentUser() u: JwtPayload, @Body() body: InboxBulkDto) {
     if (!body.ids?.length) return { count: 0 };
     const where = { id: { [Op.in]: body.ids }, userId: u.sub };
     
@@ -255,7 +257,7 @@ export class NotificationsController {
   }
 
   @Patch("preferences")
-  async updatePrefs(@CurrentUser() u: JwtPayload, @Body() b: any) {
+  async updatePrefs(@CurrentUser() u: JwtPayload, @Body() b: NotificationPrefsDto) {
     return this.notifications.updatePreferences(u.sub, b);
   }
 }

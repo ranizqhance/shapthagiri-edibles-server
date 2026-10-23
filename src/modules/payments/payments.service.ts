@@ -151,7 +151,7 @@ export class PaymentsService {
     }
   }
 
-  async verifyPayment(b: PaymentVerifyDto) {
+  async verifyPayment(b: PaymentVerifyDto, user?: JwtPayload) {
     if (!env.ONLINE_PAYMENTS_ENABLED) {
       throw new BadRequestException("BAD_REQUEST", "Online payment isn't available right now. Please choose Cash on Delivery.");
     }
@@ -170,6 +170,13 @@ export class PaymentsService {
       // 2. Fetch payment
       const payment = await this.pay.findOne({ where: { gatewayReferenceId: b.razorpay_order_id } });
       if (!payment) throw new NotFoundException("NOT_FOUND", "Payment not found");
+      // Only the order's own customer confirms its payment from the browser (the
+      // webhook covers everything else). Answers like a missing payment, so
+      // gateway order ids cannot be probed from another account.
+      if (user) {
+        const order = await this.order.findByPk(payment.orderId, { attributes: ["id", "userId"] });
+        if (!order || order.userId !== user.sub) throw new NotFoundException("NOT_FOUND", "Payment not found");
+      }
 
       // IMMEDIATELY save the transaction ID (gatewayRef) now that the signature is verified
       if (b.razorpay_payment_id && payment.gatewayRef !== b.razorpay_payment_id) {
@@ -254,6 +261,10 @@ export class PaymentsService {
    * @returns `false` – payment was not captured (still pending or error)
    */
   async jitReconcileOrder(orderId: string): Promise<boolean> {
+    // With online payment off the provider is the mock, whose "is it captured?"
+    // always answers yes — so reconciling would mark any pending online
+    // payment as paid. Nothing to reconcile when nothing is taken online.
+    if (!env.ONLINE_PAYMENTS_ENABLED) return false;
     const payment = await this.pay.findOne({
       where: { orderId, status: "pending" },
       order: [["createdAt", "DESC"]]
@@ -418,7 +429,10 @@ export class PaymentsService {
       throw new BadRequestException("CONFLICT", `Cannot refund a payment with status "${payment.status}".`);
     }
     const alreadyRefunded = (await this.refund.findAll({
-      where: { paymentId: payment.id, status: ["succeeded", "processing"] as any },
+      // `pending` counts: a refund already queued (a cancellation creates
+      // exactly that) is money promised; leaving it out allowed a second
+      // refund of the same amount on top.
+      where: { paymentId: payment.id, status: ["pending", "succeeded", "processing"] as any },
       attributes: ["amount"],
     })).reduce((sum, r) => sum + Number(r.amount), 0);
 
@@ -552,6 +566,7 @@ export class PaymentsService {
    */
   @Cron(CronExpression.EVERY_10_MINUTES)
   async reconcileStuckCaptures(): Promise<{ captured: number; checked: number }> {
+    if (!env.ONLINE_PAYMENTS_ENABLED) return { captured: 0, checked: 0 }; // see jitReconcileOrder
     const holdMs = (env.PAYMENT_HOLD_MINUTES ?? 20) * 60_000;
     const olderThan = new Date(Date.now() - holdMs);
     const floor = new Date(Date.now() - 7 * 24 * 3600_000); // don't poll ancient rows forever
@@ -591,6 +606,9 @@ export class PaymentsService {
    */
   @Cron(CronExpression.EVERY_5_MINUTES)
   async reconcilePendingRefunds(): Promise<{ settled: number; failed: number; stillPending: number }> {
+    // The mock reports every refund "succeeded"; with online payment off there
+    // is no gateway to ask.
+    if (!env.ONLINE_PAYMENTS_ENABLED) return { settled: 0, failed: 0, stillPending: 0 };
     const inFlight = await this.refund.findAll({
       where: { status: { [Op.in]: ['pending', 'processing'] } },
       limit: 50,

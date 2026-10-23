@@ -1,5 +1,6 @@
 import { Body, Controller, Get, HttpCode, Post } from "@nestjs/common";
 import { Throttle } from "@nestjs/throttler";
+import { LIMITS } from "@/common/security/throttle";
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiBody } from "@nestjs/swagger";
 import { AuthService } from "./auth.service";
 import { RegisterDto } from "./dto/register.dto";
@@ -46,7 +47,7 @@ export class AuthController {
    */
 
   @Public()
-  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Throttle(LIMITS.verifyCode)
   @Post("otp/checkout")
   @HttpCode(200)
   @ApiOperation({
@@ -59,7 +60,7 @@ export class AuthController {
   }
 
   @Public()
-  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  @Throttle(LIMITS.sendCode)
   @Post("otp/email/send")
   @HttpCode(200)
   @ApiOperation({
@@ -72,7 +73,7 @@ export class AuthController {
   }
 
   @Public()
-  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Throttle(LIMITS.verifyCode)
   @Post("otp/email/verify")
   @HttpCode(200)
   @ApiOperation({ summary: "Checkout: verify the emailed code, then sign in or create the account" })
@@ -104,7 +105,7 @@ export class AuthController {
    * competitor's account by guessing at their address.
    */
   @Public()
-  @Throttle({ default: { limit: 5, ttl: 900_000 } })
+  @Throttle(LIMITS.login)
   @Post("login")
   @HttpCode(200)
   @ApiOperation({ summary: "Login with email + password (admin / shop manager / staff)" })
@@ -135,7 +136,7 @@ export class AuthController {
   // Sends an email per call to an address the caller names: a mail bomb and an
   // SMTP-quota burn in one. Was unthrottled.
   @Public()
-  @Throttle({ default: { limit: 3, ttl: 3_600_000 } })
+  @Throttle(LIMITS.sendCode)
   @Post("register/send-otp")
   @HttpCode(200)
   @ApiOperation({ summary: "Registration: email a 6-digit OTP (temporary email verification while SMS OTP is disabled)" })
@@ -146,7 +147,7 @@ export class AuthController {
   // Guessing a 6-digit code. The per-code attempt cap resets whenever a new
   // code is minted, so the request limit is what actually bounds this.
   @Public()
-  @Throttle({ default: { limit: 10, ttl: 900_000 } })
+  @Throttle(LIMITS.verifyCode)
   @Post("register/verify-otp")
   @HttpCode(200)
   @ApiOperation({ summary: "Registration: verify the emailed OTP and create the account" })
@@ -157,7 +158,7 @@ export class AuthController {
   // Same shape as register/send-otp, aimed at an address that definitely
   // exists. Was unthrottled.
   @Public()
-  @Throttle({ default: { limit: 3, ttl: 3_600_000 } })
+  @Throttle(LIMITS.sendCode)
   @Post("forgot-password")
   @HttpCode(200)
   @ApiOperation({ summary: "Request a password reset link (emailed). Always returns a generic message." })
@@ -167,7 +168,7 @@ export class AuthController {
 
   // Guessing a reset token.
   @Public()
-  @Throttle({ default: { limit: 10, ttl: 900_000 } })
+  @Throttle(LIMITS.verifyCode)
   @Post("reset-password")
   @HttpCode(200)
   @ApiOperation({ summary: "Set a new password using a valid, unexpired reset token" })

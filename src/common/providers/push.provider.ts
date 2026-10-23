@@ -1,5 +1,6 @@
 import { getFirebase } from "@/config/firebase";
 import { logger } from "@/common/utils/logger";
+import { withTimeout } from "@/common/utils/timeout.util";
 
 export class PushProvider {
   async send(token: string, title: string, body: string, data: Record<string, string> = {}): Promise<void> {
@@ -9,11 +10,11 @@ export class PushProvider {
       return;
     }
     try {
-      const id = await fb.messaging().send({
+      const id = await withTimeout(fb.messaging().send({
         token,
         notification: { title, body },
         data,
-      });
+      }), 10_000, "FCM send");
       logger.info(`Push sent (id=${id})`);
     } catch (e) {
       logger.error("FCM send failed", { error: e });
@@ -27,11 +28,11 @@ export class PushProvider {
       return;
     }
     try {
-      const res = await fb.messaging().sendEachForMulticast({
+      const res = await withTimeout(fb.messaging().sendEachForMulticast({
         tokens,
         notification: { title, body },
         data,
-      });
+      }), 15_000, "FCM multicast");
       logger.info(`Push multicast: ${res.successCount} ok / ${res.failureCount} failed`);
     } catch (e) {
       logger.error("FCM multicast failed", { error: e });

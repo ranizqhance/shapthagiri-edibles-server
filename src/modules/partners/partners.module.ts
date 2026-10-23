@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { Op } from "sequelize";
 import { Body, Controller, Get, Module, Param, Post, Query } from "@nestjs/common";
 import { Throttle } from "@nestjs/throttler";
@@ -21,11 +20,9 @@ import { paginate, findOr404 } from "@/common/utils/crud.util";
 import { AssignmentExpiredException, NoPartnerAvailableException } from "@/common/errors/domain";
 import { ForbiddenException, BadRequestException, NotFoundException, ConflictException } from "@/common/errors/http";
 import { OrderStatus } from "@/common/enums/order-status.enum";
-import { hashPassword } from "@/common/utils/password.util";
-import { buildDeliveryPartnerDefaults, createPartnerDocuments } from "@/common/utils/partner.util";
 import {
-  DeliverDto, FailDto, PartnerDocumentDto, PartnerOnlineDto, PartnerPingDto, PartnerRegisterDto,
-  PartnerOnboardDto, RejectPartnerDto, AssignZoneDto, BackgroundCheckDto, OrientationDto, VerifyPartnerDto,
+  DeliverDto, FailDto, PartnerDocumentDto, PartnerOnlineDto, PartnerPingDto,
+  RejectPartnerDto, AssignZoneDto, BackgroundCheckDto, OrientationDto, VerifyPartnerDto,
 } from "@/common/dto/common.dto";
 import { NotificationsModule } from "@/modules/notifications/notifications.module";
 import { NotificationsService } from "@/modules/notifications/notifications.service";
@@ -115,67 +112,15 @@ export class PartnersController {
     if (order) await this.notifications.notify(order.userId, title, body, "all");
   }
 
-  /**
-   * Unauthenticated, so it is throttled hard: it inserts a row per call and
-   * nothing downstream deduplicates. The sibling `onboard` route below was
-   * already throttled; this one was missed.
+  /*
+   * There is no public sign-up for delivery partners. `POST partners/register`
+   * and `POST partners/onboard` were unauthenticated: the first trusted a
+   * client-supplied userId, the second minted an ACTIVE delivery_partner
+   * account from any email — a role that skips customer-only checks and can
+   * see shipments. Partners are created by staff (POST admin/users with role
+   * delivery_partner, gated by users.create), and the storefront page asks
+   * applicants to get in touch instead.
    */
-  @Public() @Throttle({ default: { ttl: 3_600_000, limit: 3 } })
-  @Post("register") register(@Body() b: PartnerRegisterDto) { return this.partner.create(b as any); }
-
-  /** Self-serve onboarding: creates the User (if absent) + a PENDING partner profile + documents, transactionally. */
-  @Public() @Throttle({ default: { ttl: 60_000, limit: 5 } }) @Post("onboard") async onboard(@Body() b: PartnerOnboardDto) {
-    const sequelize = this.partner.sequelize!;
-    return sequelize.transaction(async (t) => {
-      const email = b.email?.trim() || `${b.phone}@partners.local`;
-      // Reuse an existing account by email if present, otherwise create one.
-      let user = await this.user.findOne({ where: { email }, transaction: t });
-      if (user) {
-        /*
-         * Do NOT silently attach a partner profile to an account found by
-         * email. This route is public and takes the address from the request
-         * body, so matching on it alone let anyone bolt a DELIVERY_PARTNER
-         * profile onto a stranger's account by typing their address.
-         */
-        throw new BadRequestException(
-          "CONFLICT",
-          "An account already exists for this email. Sign in first, then apply to deliver.",
-        );
-      }
-      /*
-       * A random password, never the phone number.
-       *
-       * This used to be the last 8 digits of the number submitted in the same
-       * request — a value the applicant publishes on their own parcels, and
-       * one anybody can guess for a DELIVERY_PARTNER account, which can view
-       * shipments and file proofs of delivery. Nobody is told this value; the
-       * partner signs in with the OTP flow or a password reset.
-       */
-      const rawPassword = randomBytes(24).toString("base64url");
-      user = await this.user.create({
-        name: b.name, email, phone: b.phone, passwordHash: await hashPassword(rawPassword),
-        role: Role.DELIVERY_PARTNER, isActive: true,
-      } as any, { transaction: t });
-      const existing = await this.partner.findOne({ where: { userId: user.id }, transaction: t });
-      if (existing) throw new BadRequestException("CONFLICT", "A delivery partner profile already exists for this account");
-
-      // Shared attribute builder (also used by AdminController.createUser) keeps the
-      // two partner-creation paths and the `bank` JSONB shape identical.
-      const partner = await this.partner.create(
-        buildDeliveryPartnerDefaults({
-          userId: user.id, name: b.name, phone: b.phone, avatarUrl: b.avatarUrl,
-          vehicle: b.vehicle, vehicleNumber: b.vehicleNumber, address: b.address, city: b.city,
-          licenseNumber: b.licenseNumber, bankAccountNumber: b.bankAccountNumber,
-          bankIfscCode: b.bankIfscCode, bankName: b.bankName,
-          emergencyContactName: b.emergencyContactName, emergencyContactPhone: b.emergencyContactPhone,
-        }) as any,
-        { transaction: t },
-      );
-
-      await createPartnerDocuments(this.doc, partner.id, b.documents, t);
-      return partner;
-    });
-  }
 
   /**
    * KYC documents, scoped to the partner they belong to.
@@ -322,8 +267,16 @@ export class PartnersController {
         model: OrderShipment,
         as: "shipment",
         include: [
-          { model: Shop, as: "shop" },
-          { model: Order, as: "order", include: [{ model: User, as: "user" }] }
+          // What a rider needs to deliver and collect — the shop's name and
+          // address, the drop-off, the amount to collect and the customer's name
+          // and number. It used to be the full order and the customer's whole
+          // account row, even for jobs only offered to this rider.
+          { model: Shop, as: "shop", attributes: ["id", "name", "address", "lat", "lng", "phone"] },
+          {
+            model: Order, as: "order",
+            attributes: ["id", "orderNumber", "addressSnapshot", "paymentMethod", "paymentStatus", "total", "payableAmount"],
+            include: [{ model: User, as: "user", attributes: ["id", "name", "phone"] }],
+          }
         ]
       }
     ]);

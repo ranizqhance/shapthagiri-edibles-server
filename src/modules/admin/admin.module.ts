@@ -1,3 +1,7 @@
+import { randomBytes } from "node:crypto";
+import { csvCell } from "@/common/utils/csv.util";
+import { Throttle } from "@nestjs/throttler";
+import { LIMITS } from "@/common/security/throttle";
 import { Body, Controller, Get, Module, Param, Patch, Post, Put, Query, Delete, Ip, Res } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { InjectModel, SequelizeModule } from "@nestjs/sequelize";
@@ -8,6 +12,8 @@ import { RequirePermissions, RequireAnyPermission } from "@/common/decorators/pe
 import { WILDCARD_PERMISSION } from "@/modules/rbac/rbac.catalog";
 import { Role } from "@/common/enums/role.enum";
 import { Role as RbacRoleModel } from "@/models/role.model";
+import { RbacCacheService } from "@/modules/rbac/rbac-cache.service";
+import { assertCanGrant } from "@/common/utils/permission.util";
 import { CurrentUser } from "@/common/decorators/current-user.decorator";
 import { JwtPayload } from "@/modules/auth/jwt.strategy";
 import { PageOptionsDto } from "@/common/dto/page-options.dto";
@@ -59,7 +65,23 @@ export class AdminController {
     @InjectModel(Setting) private setting: typeof Setting,
     @InjectModel(AuditLog) private audit: typeof AuditLog,
     private eventEmitter: EventEmitter2,
+    private rbacCache: RbacCacheService,
   ) {}
+
+  /**
+   * Refuse to create or re-role an account with permissions the actor lacks,
+   * or to re-role an account more privileged than the actor. users.create /
+   * users.editRole used to mean "may make anyone an admin".
+   */
+  private async assertMayAssign(actor: JwtPayload, roleKeyOrEnum: string, roleId?: string, target?: User | null) {
+    let id = roleId;
+    // The role the account will actually get: by its own key first (custom
+    // roles), then by the legacy enum bucket the write below falls back to.
+    if (!id) id = (await RbacRoleModel.findOne({ where: { key: roleKeyOrEnum }, attributes: ["id"] }))?.id;
+    if (!id) id = (await RbacRoleModel.findOne({ where: { key: enumBucketFor(roleKeyOrEnum as any) }, attributes: ["id"] }))?.id;
+    assertCanGrant(actor, id ? await this.rbacCache.getPermissionsForRole(id) : [WILDCARD_PERMISSION]);
+    if (target) assertCanGrant(actor, (await this.rbacCache.getPermissionsForUser(target)).permissions);
+  }
 
   /**
    * The shopId to persist for a given role. A shop manager MUST be assigned to a
@@ -136,7 +158,9 @@ export class AdminController {
 
   @RequirePermissions('users.create')
   @Post("users") async createUser(@CurrentUser() actor: JwtPayload, @Ip() ip: string, @Body() b: AdminCreateUserDto) {
-    const passwordHash = await hashPassword(b.password ?? "changeme");
+    await this.assertMayAssign(actor, b.role, b.roleId);
+    // The DTO requires a password; never fall back to a known literal anyway.
+    const passwordHash = await hashPassword(b.password ?? randomBytes(32).toString("base64url"));
     // Use a transaction to ensure both the user record and the partner profile are
     // created atomically. If partner creation fails the user insert is rolled back,
     // keeping the Admin Users and Delivery Partners modules in sync at all times.
@@ -205,6 +229,8 @@ export class AdminController {
   @RequirePermissions('users.editRole')
   @Patch("users/:id/role") async role(@CurrentUser() actor: JwtPayload, @Ip() ip: string, @Param("id") id: string, @Body() b: UpdateRoleDto) {
     const user = await this.user.findByPk(id);
+    if (!user) throw new NotFoundException("NOT_FOUND", "User not found");
+    await this.assertMayAssign(actor, b.role, b.roleId, user);
     // Same guard as create: a shop manager must have a valid shop; other roles get null.
     const shopId = await this.resolveShopAssignment(b.role, b.shopId);
     // Resolve the RBAC role to persist. `.update()` is a bulk write and does NOT fire
@@ -408,6 +434,7 @@ export class AdminController {
    * 20k rows) so an operator can pull a complete slice for offline review. Written
    * straight to the response to skip the JSON envelope.
    */
+  @Throttle(LIMITS.export)
   @RequirePermissions('audit.export')
   @Get("audit-logs/export") async auditExport(
     @Res() res: Response,
@@ -428,10 +455,9 @@ export class AdminController {
       limit: 20000,
     });
 
-    const esc = (v: unknown) => {
-      const s = v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
-      return `"${s.replace(/"/g, '""')}"`;
-    };
+    // Quoted and formula-defused: the before/after JSON and names here are
+    // text people typed, and this file is opened in a spreadsheet.
+    const esc = csvCell;
     const header = ["Timestamp", "Actor", "Actor Role", "Action", "Entity", "Entity ID", "IP", "Correlation ID", "Before", "After"];
     const lines = [header.map(esc).join(",")];
     for (const r of rows as any[]) {

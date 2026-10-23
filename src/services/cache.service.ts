@@ -12,9 +12,12 @@ import { env } from "@/config/env";
  */
 @Injectable()
 export class CacheService {
-  private cache = new NodeCache({ stdTTL: 300, checkperiod: 60 }); // 5‑minute TTL
+  // 5-minute TTL, and a ceiling: some keys include request input (a shop id),
+  // and without one an anonymous caller could mint keys until the heap gave out.
+  private cache = new NodeCache({ stdTTL: 300, checkperiod: 60, maxKeys: 5_000 });
   private readonly logger = new Logger(CacheService.name);
   private warnedNoPurge = false;
+  private warnedFullAt = 0;
 
   /** Sanitize a value before caching: remove Sequelize models, sockets, req/res, etc. */
   private sanitize<T>(value: T): T {
@@ -42,10 +45,22 @@ export class CacheService {
 
   set<T>(key: string, value: T, ttlSeconds?: number) {
     const safeValue = this.sanitize(value);
-    if (ttlSeconds !== undefined) {
-      this.cache.set(key, safeValue, ttlSeconds);
-    } else {
-      this.cache.set(key, safeValue);
+    // A full cache refuses new keys (node-cache throws). Serving the request
+    // uncached is the right answer then, not an error.
+    try {
+      if (ttlSeconds !== undefined) {
+        this.cache.set(key, safeValue, ttlSeconds);
+      } else {
+        this.cache.set(key, safeValue);
+      }
+    } catch (e) {
+      // At most once a minute: a full cache is exactly the state someone
+      // filling it on purpose would hold it in, and a line per refused key
+      // would turn that into a log flood.
+      if (Date.now() - this.warnedFullAt > 60_000) {
+        this.warnedFullAt = Date.now();
+        this.logger.warn(`cache full (${(e as Error).message}); serving uncached until entries expire`);
+      }
     }
   }
 

@@ -139,7 +139,7 @@ export class ProductDto {
   @ApiPropertyOptional() @IsOptional() @IsString() description?: string;
   @ApiPropertyOptional() @IsOptional() @IsObject() specifications?: Record<string, unknown>;
   @ApiPropertyOptional() @IsOptional() @IsUUID() shopId?: string;
-  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() @IsString({ each: true }) shopIds?: string[];
+  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() @ArrayMaxSize(200) @IsString({ each: true }) shopIds?: string[];
   @ApiPropertyOptional() @IsOptional() @IsString() sku?: string;
   @ApiPropertyOptional() @IsOptional() @IsNumber() defaultPrice?: number;
   @ApiPropertyOptional() @IsOptional() @IsNumber() mrp?: number;
@@ -192,7 +192,7 @@ export class CompareDto {
  */
 export class NewShopManagerDto {
   @ApiProperty({ example: "Jane Doe" }) @IsString() @IsNotEmpty() name!: string;
-  @ApiProperty({ example: "manager@shapthagiri-edibles.com" }) @IsEmail() email!: string;
+  @ApiProperty({ example: "manager@example.com" }) @IsEmail() email!: string;
   @ApiProperty({ example: "s3cret123" }) @IsString() @MinLength(6, { message: "Password must be at least 6 characters" }) password!: string;
   @ApiPropertyOptional() @IsOptional() @IsString() @Matches(/^\+?[0-9]{10,15}$/, { message: "Invalid phone number format" }) phone?: string;
 }
@@ -213,8 +213,8 @@ export class ShopDto {
   @ApiPropertyOptional({ example: "India" }) @IsOptional() @IsString() country?: string;
   @ApiPropertyOptional({ example: "678555" }) @IsOptional() @IsString() postalCode?: string;
   @ApiPropertyOptional() @IsOptional() @IsNumber() @Min(0.1, { message: "Radius must be greater than 0 km" }) @Max(4000, { message: "Radius cannot exceed 4000 km" }) deliveryRadiusKm?: number;
-  @ApiPropertyOptional() @IsOptional() @IsArray() @IsString({ each: true }) supportedZones?: string[];
-  @ApiPropertyOptional() @IsOptional() @IsArray() @IsString({ each: true }) weeklyHolidays?: string[];
+  @ApiPropertyOptional() @IsOptional() @IsArray() @ArrayMaxSize(100) @IsString({ each: true }) supportedZones?: string[];
+  @ApiPropertyOptional() @IsOptional() @IsArray() @ArrayMaxSize(31) @IsString({ each: true }) weeklyHolidays?: string[];
   @ApiPropertyOptional() @IsOptional() @IsString() openingTime?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() closingTime?: string;
   @ApiPropertyOptional() @IsOptional() @IsUUID() managerId?: string;
@@ -267,7 +267,7 @@ export class InventoryBulkItemDto {
 
 export class InventoryBulkDto {
   @ApiProperty({ type: [InventoryBulkItemDto] })
-  @IsArray()
+  @IsArray() @ArrayMaxSize(500)
   @ValidateNested({ each: true })
   @Type(() => InventoryBulkItemDto)
   items!: InventoryBulkItemDto[];
@@ -314,19 +314,19 @@ export class ShippingZoneDto {
   @ApiProperty({ example: "Kerala" }) @IsString() @MaxLength(60) name!: string;
   /** Delivery-address states this zone covers. Empty on the catch-all zone. */
   @ApiPropertyOptional({ type: [String], example: ["Kerala"] })
-  @IsOptional() @IsArray() @IsString({ each: true }) states?: string[];
+  @IsOptional() @IsArray() @ArrayMaxSize(50) @IsString({ each: true }) states?: string[];
   @ApiPropertyOptional({ example: false }) @IsOptional() @IsBoolean() isDefault?: boolean;
   @ApiPropertyOptional({ example: 40, description: "Charged per whole kg past the heaviest band." })
   @IsOptional() @IsNumber() @Min(0) perKgAboveTopBand?: number;
   @ApiPropertyOptional({ type: [ShippingBandDto] })
-  @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => ShippingBandDto)
+  @IsOptional() @IsArray() @ArrayMaxSize(50) @ValidateNested({ each: true }) @Type(() => ShippingBandDto)
   bands?: ShippingBandDto[];
 }
 
 /** The entire grid, as the admin screen edits it. */
 export class ShippingRatesSaveDto {
   @ApiProperty({ type: [ShippingZoneDto] })
-  @IsArray() @ArrayMinSize(1) @ValidateNested({ each: true }) @Type(() => ShippingZoneDto)
+  @IsArray() @ArrayMaxSize(50) @ArrayMinSize(1) @ValidateNested({ each: true }) @Type(() => ShippingZoneDto)
   zones!: ShippingZoneDto[];
 }
 
@@ -346,7 +346,7 @@ export class CartAddDto {
  */
 export class CartMergeDto {
   @ApiProperty({ type: () => [CartAddDto] })
-  @IsArray() @ArrayMinSize(1) @ValidateNested({ each: true }) @Type(() => CartAddDto)
+  @IsArray() @ArrayMaxSize(100) @ArrayMinSize(1) @ValidateNested({ each: true }) @Type(() => CartAddDto)
   items!: CartAddDto[];
 }
 
@@ -361,14 +361,14 @@ export class CouponApplyDto {
 
 export class CartCouponApplyDto extends CouponApplyDto {
   @ApiProperty({ example: 1500 }) @IsNumber() cartTotal!: number;
-  @ApiPropertyOptional() @IsOptional() @IsArray() items?: any[];
+  @ApiPropertyOptional() @IsOptional() @IsArray() @ArrayMaxSize(200) items?: any[];
   @ApiPropertyOptional() @IsOptional() @IsString() paymentMethod?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() deliveryMethod?: string;
 }
 
 export class EligibleCouponsDto {
   @ApiProperty({ example: 1500 }) @IsNumber() cartTotal!: number;
-  @ApiPropertyOptional() @IsOptional() @IsArray() items?: any[];
+  @ApiPropertyOptional() @IsOptional() @IsArray() @ArrayMaxSize(200) items?: any[];
   @ApiPropertyOptional() @IsOptional() @IsString() paymentMethod?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() deliveryMethod?: string;
 }
@@ -400,7 +400,7 @@ export class EstimateDto {
   @ApiPropertyOptional() @IsOptional() @IsNumber() lat?: number;
   @ApiPropertyOptional() @IsOptional() @IsNumber() lng?: number;
   @ApiProperty({ type: [EtaItemDto] })
-  @IsArray()
+  @IsArray() @ArrayMaxSize(100)
   @ValidateNested({ each: true })
   @Type(() => EtaItemDto)
   items!: EtaItemDto[];
@@ -559,7 +559,7 @@ export class PartnerOnboardDto {
   @ApiPropertyOptional() @IsOptional() @IsString() bankName?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() emergencyContactName?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() emergencyContactPhone?: string;
-  @ApiPropertyOptional({ type: [OnboardDocumentDto] }) @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => OnboardDocumentDto) documents?: OnboardDocumentDto[];
+  @ApiPropertyOptional({ type: [OnboardDocumentDto] }) @IsOptional() @IsArray() @ArrayMaxSize(20) @ValidateNested({ each: true }) @Type(() => OnboardDocumentDto) documents?: OnboardDocumentDto[];
 }
 
 export class RejectPartnerDto {
@@ -636,7 +636,7 @@ export class ReturnBatchItemDto {
 
 export class CreateReturnBatchDto {
   @ApiProperty({ type: [ReturnBatchItemDto] })
-  @IsArray() @ArrayMinSize(1) @ValidateNested({ each: true }) @Type(() => ReturnBatchItemDto)
+  @IsArray() @ArrayMaxSize(50) @ArrayMinSize(1) @ValidateNested({ each: true }) @Type(() => ReturnBatchItemDto)
   items!: ReturnBatchItemDto[];
   @ApiProperty({ example: "damaged" }) @IsString() reason!: string;
   @ApiPropertyOptional({ example: "pickup" }) @IsOptional() @IsString() method?: string;
@@ -664,19 +664,42 @@ export class ExchangeDto {
   @ApiPropertyOptional({ example: 2 }) @IsOptional() @IsInt() @Min(1) quantity?: number;
 }
 
+/*
+ * Staff actions on a return. These bodies were typed inline in the controller,
+ * which the ValidationPipe cannot see — so nothing checked them, and a negative
+ * restocking fee was subtracted as a credit, raising the refund past what the
+ * customer paid.
+ */
+export class RejectReturnDto {
+  @ApiProperty({ example: "Item shows signs of use" }) @IsString() @IsNotEmpty() @MaxLength(500) reason!: string;
+}
+export class InspectReturnDto {
+  @ApiProperty({ enum: ["passed", "failed"] }) @IsIn(["passed", "failed"]) status!: "passed" | "failed";
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(1000) comments?: string;
+  // Only ever reduces the refund; the service also clamps it to the refundable amount.
+  @ApiPropertyOptional({ example: 25 }) @IsOptional() @IsNumber() @Min(0) deductRestockingFee?: number;
+  @ApiPropertyOptional({ enum: ["sellable", "damaged", "scrap"] }) @IsOptional() @IsIn(["sellable", "damaged", "scrap"]) condition?: "sellable" | "damaged" | "scrap";
+}
+export class SchedulePickupDto {
+  @ApiProperty({ example: "2026-11-02T10:00:00.000Z" }) @IsDateString() scheduledAt!: string;
+}
+export class ConfirmPickupDto {
+  @ApiPropertyOptional({ enum: ["picked_up", "received_at_shop"] }) @IsOptional() @IsIn(["picked_up", "received_at_shop"]) status?: "picked_up" | "received_at_shop";
+}
+
 /* ===== Reviews ===== */
 export class ProductReviewDto {
   // @Max(5) was missing — a rating of 9999 was accepted.
   @ApiProperty({ example: 5 }) @IsInt() @Min(1) @Max(5) rating!: number;
   @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(4000) text?: string;
   /** Uploaded media URLs (from POST /uploads). */
-  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() @IsString({ each: true }) media?: string[];
+  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() @ArrayMaxSize(10) @IsString({ each: true }) media?: string[];
 }
 
 export class UpdateReviewDto {
   @ApiPropertyOptional({ example: 4 }) @IsOptional() @IsInt() @Min(1) @Max(5) rating?: number;
   @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(4000) text?: string;
-  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() @IsString({ each: true }) media?: string[];
+  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() @ArrayMaxSize(10) @IsString({ each: true }) media?: string[];
 }
 
 export class ReviewReplyDto {
@@ -686,7 +709,7 @@ export class ReviewReplyDto {
 export class DeliveryReviewDto {
   // Had no bounds at all — negatives and 9999 were accepted.
   @ApiProperty({ example: 5 }) @IsInt() @Min(1) @Max(5) rating!: number;
-  @ApiPropertyOptional() @IsOptional() @IsArray() @IsString({ each: true }) tags?: string[];
+  @ApiPropertyOptional() @IsOptional() @IsArray() @ArrayMaxSize(30) @IsString({ each: true }) tags?: string[];
   @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(2000) feedback?: string;
 }
 
@@ -758,7 +781,7 @@ export class PromotionDto {
   @IsIn(["auto", "buy_x_get_y", "buy_x_get_x", "cart", "category", "festival", "flash"]) type!: string;
   @ApiPropertyOptional({ enum: ["cart", "product", "variant", "category", "brand", "shop", "all"] })
   @IsOptional() @IsIn(["cart", "product", "variant", "category", "brand", "shop", "all"]) scope?: string;
-  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() scopeIds?: string[];
+  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() @ArrayMaxSize(500) @IsString({ each: true }) scopeIds?: string[];
   @ApiPropertyOptional({ enum: ["pct", "flat", "reward"] }) @IsOptional() @IsIn(["pct", "flat", "reward"]) discountKind?: string;
   @ApiPropertyOptional() @IsOptional() @IsNumber() @Min(0) discountValue?: number;
   @ApiPropertyOptional() @IsOptional() @IsObject() rewardRule?: Record<string, unknown>;
@@ -770,8 +793,8 @@ export class PromotionDto {
   @ApiPropertyOptional() @IsOptional() @IsInt() perUserLimit?: number;
   @ApiPropertyOptional() @IsOptional() @IsInt() stockCap?: number;
   @ApiPropertyOptional() @IsOptional() @IsUUID() shopId?: string;
-  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() shopIds?: string[];
-  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() excludeShopIds?: string[];
+  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() @ArrayMaxSize(200) @IsString({ each: true }) shopIds?: string[];
+  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() @ArrayMaxSize(200) @IsString({ each: true }) excludeShopIds?: string[];
   @ApiPropertyOptional({ enum: ["draft", "active", "paused", "inactive", "expired"] })
   @IsOptional() @IsIn(["draft", "active", "paused", "inactive", "expired"]) status?: string;
   @ApiPropertyOptional() @IsOptional() @IsObject() metadata?: Record<string, unknown>;
@@ -781,14 +804,14 @@ export class UpdatePromotionDto extends PartialType(PromotionDto) {}
 /** Read-only resolver preview input: evaluate active promotions against a cart. */
 export class ResolvePromotionsDto {
   @ApiProperty({ type: [Object], description: "Cart lines: { variantId, quantity, shopId?, priceSnapshot? }" })
-  @IsArray() items!: any[];
+  @IsArray() @ArrayMaxSize(200) items!: any[];
   @ApiPropertyOptional() @IsOptional() @IsUUID() shopId?: string;
 }
 
 /** Read-only orchestrator preview: merge promotions + an optional coupon (Phase 2). */
 export class OrchestratePreviewDto {
   @ApiProperty({ type: [Object], description: "Cart lines: { variantId, quantity, shopId?, priceSnapshot? }" })
-  @IsArray() items!: any[];
+  @IsArray() @ArrayMaxSize(200) items!: any[];
   @ApiPropertyOptional() @IsOptional() @IsUUID() shopId?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() couponCode?: string;
   @ApiPropertyOptional() @IsOptional() @IsString() paymentMethod?: string;
@@ -844,7 +867,7 @@ export class CreateDisputeDto {
   @ApiPropertyOptional({ enum: DISPUTE_DESIRED }) @IsOptional() @IsIn(DISPUTE_DESIRED as unknown as string[]) desiredResolution?: string;
   @ApiPropertyOptional() @IsOptional() @IsNumber() @Min(0) amountClaimed?: number;
   // Evidence image URLs (uploaded via /uploads) attached at creation.
-  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() attachments?: string[];
+  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() @ArrayMaxSize(10) @IsString({ each: true }) attachments?: string[];
 }
 
 /** Inbound payment-gateway chargeback → mapped to a Dispute. Called by the
@@ -859,7 +882,7 @@ export class ChargebackDto {
 
 export class DisputeMessageDto {
   @ApiProperty() @IsString() @MaxLength(4000) body!: string;
-  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() attachments?: string[];
+  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() @ArrayMaxSize(10) @IsString({ each: true }) attachments?: string[];
   @ApiPropertyOptional() @IsOptional() @IsBoolean() internal?: boolean;
 }
 
@@ -900,9 +923,9 @@ export class ScheduleReportDto {
   @ApiPropertyOptional({ type: ScheduleReportSpecDto }) @IsOptional() @ValidateNested() @Type(() => ScheduleReportSpecDto) schedule?: ScheduleReportSpecDto;
   // Validated + deduped in the handler (invalid addresses are reported back), so we
   // accept a loose array here rather than @IsEmail which would 422 the whole request.
-  @ApiProperty({ type: [String] }) @IsArray() recipients!: string[];
+  @ApiProperty({ type: [String] }) @IsArray() @ArrayMaxSize(50) @IsEmail({}, { each: true }) recipients!: string[];
   // Attachment formats to generate. Subset of ["pdf","csv"]; defaults to ["pdf"].
-  @ApiPropertyOptional({ type: [String], example: ["pdf", "csv"] }) @IsOptional() @IsArray() formats?: string[];
+  @ApiPropertyOptional({ type: [String], example: ["pdf", "csv"] }) @IsOptional() @IsArray() @ArrayMaxSize(5) @IsString({ each: true }) formats?: string[];
   @ApiPropertyOptional() @IsOptional() @IsBoolean() enabled?: boolean;
 }
 
@@ -933,7 +956,7 @@ export class AdminCreateUserDto {
   @ApiPropertyOptional({ example: "1234567890" }) @ValidateIf((o) => o.role === "delivery_partner") @IsString() @IsNotEmpty() bankAccountNumber?: string;
   @ApiPropertyOptional({ example: "SBIN0000123" }) @ValidateIf((o) => o.role === "delivery_partner") @IsString() @IsNotEmpty() bankIfscCode?: string;
   // Required documents (gov_id, driving_license, rc, insurance) — enforced in createUser.
-  @ApiPropertyOptional({ type: [OnboardDocumentDto] }) @ValidateIf((o) => o.role === "delivery_partner") @IsArray() @ValidateNested({ each: true }) @Type(() => OnboardDocumentDto) documents?: OnboardDocumentDto[];
+  @ApiPropertyOptional({ type: [OnboardDocumentDto] }) @ValidateIf((o) => o.role === "delivery_partner") @IsArray() @ArrayMaxSize(20) @ValidateNested({ each: true }) @Type(() => OnboardDocumentDto) documents?: OnboardDocumentDto[];
 }
 
 /** Block (false) or unblock (true) an account from the Users screen. */
@@ -962,4 +985,106 @@ export class FeatureFlagDto {
 export class SettingUpsertDto {
   @ApiProperty() @Allow() value!: unknown;
   @ApiPropertyOptional() @IsOptional() @IsString() scope?: string;
+}
+
+/* ===== Bodies and queries that used to be typed inline =====
+ *
+ * The ValidationPipe validates and whitelists only CLASS types. A body typed
+ * as `{ ... }`, `any` or a bare primitive reaches the handler exactly as sent:
+ * no field checks, no stripping of extra properties. These replace every such
+ * signature the audit found; each says only what its handler reads.
+ */
+export class ReasonDto {
+  @ApiPropertyOptional({ example: "Ordered by mistake" }) @IsOptional() @IsString() @MaxLength(500) reason?: string;
+}
+export class NoteDto {
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(1000) note?: string;
+}
+export class OrderPreviewDto {
+  @ApiProperty({ example: 499 }) @IsNumber() @Min(0) @Max(10_000_000) subtotal!: number;
+  @ApiPropertyOptional() @IsOptional() @IsNumber() @Min(0) @Max(10_000_000) discount?: number;
+  @ApiPropertyOptional() @IsOptional() @IsBoolean() express?: boolean;
+  @ApiPropertyOptional() @IsOptional() @IsBoolean() freeDelivery?: boolean;
+  @ApiPropertyOptional() @IsOptional() @IsNumber() @Min(0) @Max(10_000_000) giftCardBalance?: number;
+  @ApiPropertyOptional() @IsOptional() @IsNumber() @Min(0) @Max(10_000_000) loyaltyDiscount?: number;
+  @ApiPropertyOptional() @IsOptional() @IsNumber() @Min(0) @Max(1_000_000) parcelG?: number;
+  @ApiPropertyOptional({ example: "Kerala" }) @IsOptional() @IsString() @MaxLength(80) state?: string;
+}
+export class RepriceDto {
+  @ApiPropertyOptional() @IsOptional() @IsUUID() shopId?: string;
+}
+export class MoveCategoryDto {
+  @ApiPropertyOptional({ nullable: true }) @IsOptional() @ValidateIf((o) => o.parentId !== null) @IsUUID() parentId?: string | null;
+}
+export class SortOrderItemDto {
+  @ApiProperty() @IsUUID() id!: string;
+  @ApiProperty() @IsInt() @Min(0) @Max(100_000) sortOrder!: number;
+}
+export class SortOrderDto {
+  @ApiProperty({ type: [SortOrderItemDto] }) @IsArray() @ArrayMaxSize(200) @ValidateNested({ each: true }) @Type(() => SortOrderItemDto) items!: SortOrderItemDto[];
+}
+export class TaxPeriodDto {
+  @ApiPropertyOptional({ example: "2026-10" }) @IsOptional() @Matches(/^\d{4}-(0[1-9]|1[0-2])$/) period?: string;
+}
+export class RemitAmountDto {
+  @ApiPropertyOptional() @IsOptional() @IsNumber() @Min(0) @Max(100_000_000) amount?: number;
+}
+export class PayoutReferenceDto {
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(120) reference?: string;
+}
+export class SettlementPayDto {
+  @ApiProperty() @IsString() @IsNotEmpty() @MaxLength(120) payoutRef!: string;
+}
+export class SnoozeDto {
+  @ApiProperty({ example: 60 }) @Type(() => Number) @IsInt() @Min(1) @Max(10_080) durationMinutes!: number;
+}
+export class AssignInboxDto {
+  @ApiProperty() @IsUUID() assignedTo!: string;
+}
+export class InboxBulkDto {
+  @ApiProperty({ enum: ["markRead", "archive", "delete"] }) @IsIn(["markRead", "archive", "delete"]) action!: "markRead" | "archive" | "delete";
+  @ApiProperty({ type: [String] }) @IsArray() @ArrayMinSize(1) @ArrayMaxSize(500) @IsUUID("all", { each: true }) ids!: string[];
+}
+export class NotificationPrefsDto {
+  @ApiPropertyOptional() @IsOptional() @IsBoolean() emailEnabled?: boolean;
+  @ApiPropertyOptional() @IsOptional() @IsBoolean() pushEnabled?: boolean;
+  @ApiPropertyOptional() @IsOptional() @IsBoolean() smsEnabled?: boolean;
+  @ApiPropertyOptional() @IsOptional() @IsBoolean() browserEnabled?: boolean;
+  @ApiPropertyOptional() @IsOptional() @IsBoolean() soundEnabled?: boolean;
+}
+export class EngineToggleDto {
+  @ApiProperty() @IsBoolean() enabled!: boolean;
+}
+export class PromotionListQueryDto {
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(40) type?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(40) status?: string;
+}
+export class ProductOffersDto {
+  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() @ArrayMaxSize(100) @IsUUID("all", { each: true }) productIds?: string[];
+  @ApiPropertyOptional() @IsOptional() @IsUUID() shopId?: string;
+}
+export class DisputeListQueryDto {
+  @ApiPropertyOptional() @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(10_000) page?: number;
+  @ApiPropertyOptional() @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(100) limit?: number;
+  @ApiPropertyOptional({ enum: ["ASC", "DESC"] }) @IsOptional() @IsIn(["ASC", "DESC", "asc", "desc"]) order?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(40) status?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(40) priority?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(40) type?: string;
+  @ApiPropertyOptional() @IsOptional() @IsUUID() assignedTo?: string;
+  @ApiPropertyOptional() @IsOptional() @IsDateString() from?: string;
+  @ApiPropertyOptional() @IsOptional() @IsDateString() to?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(100) q?: string;
+}
+export class RoutingDecisionsQueryDto {
+  @ApiPropertyOptional() @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(10_000) page?: number;
+  @ApiPropertyOptional() @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(100) limit?: number;
+  @ApiPropertyOptional({ enum: ["distance", "createdAt"] }) @IsOptional() @IsIn(["distance", "createdAt"]) sort?: string;
+  @ApiPropertyOptional({ enum: ["asc", "desc"] }) @IsOptional() @IsIn(["asc", "desc", "ASC", "DESC"]) dir?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(100) q?: string;
+  @ApiPropertyOptional() @IsOptional() @IsUUID() shopId?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(60) zone?: string;
+  @ApiPropertyOptional() @IsOptional() @IsString() @MaxLength(40) status?: string;
+  @ApiPropertyOptional() @IsOptional() @IsUUID() partnerId?: string;
+  @ApiPropertyOptional() @IsOptional() @IsDateString() dateFrom?: string;
+  @ApiPropertyOptional() @IsOptional() @IsDateString() dateTo?: string;
 }

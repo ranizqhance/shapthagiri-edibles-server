@@ -6,9 +6,7 @@ import { CurrentUser } from "@/common/decorators/current-user.decorator";
 import { JwtPayload } from "@/modules/auth/jwt.strategy";
 import { RequirePermissions } from "@/common/decorators/permissions.decorator";
 import { DisputesService } from "./disputes.service";
-import {
-  CreateDisputeDto, DisputeMessageDto, AssignDisputeDto, EscalateDisputeDto, RejectDisputeDto, ResolveDisputeDto, ChargebackDto,
-} from "@/common/dto/common.dto";
+import { CreateDisputeDto, DisputeMessageDto, AssignDisputeDto, EscalateDisputeDto, RejectDisputeDto, ResolveDisputeDto, ChargebackDto, DisputeListQueryDto, NoteDto } from "@/common/dto/common.dto";
 import { NotificationsModule } from "@/modules/notifications/notifications.module";
 import { WalletModule } from "@/modules/wallet/wallet.module";
 import { PromotionsModule } from "@/modules/promotions/promotions.module";
@@ -26,14 +24,14 @@ export class DisputesController {
   }
 
   @Get("me")
-  mine(@CurrentUser() u: JwtPayload, @Query() opts: any) {
+  mine(@CurrentUser() u: JwtPayload, @Query() opts: DisputeListQueryDto) {
     return this.svc.myDisputes(u, opts);
   }
 
   // ── Staff queue ──
   @RequirePermissions("disputes.view")
   @Get()
-  list(@CurrentUser() u: JwtPayload, @Query() opts: any) {
+  list(@CurrentUser() u: JwtPayload, @Query() opts: DisputeListQueryDto) {
     return this.svc.list(u, opts);
   }
 
@@ -83,7 +81,7 @@ export class DisputesController {
 
   @RequirePermissions("disputes.view")
   @Post(":id/request-info")
-  requestInfo(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() b: { note?: string }) {
+  requestInfo(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() b: NoteDto) {
     return this.svc.requestInfo(u, id, b?.note);
   }
 

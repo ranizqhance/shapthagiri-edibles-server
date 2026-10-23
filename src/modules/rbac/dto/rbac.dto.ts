@@ -1,4 +1,4 @@
-import { IsArray, IsBoolean, IsOptional, IsString, MaxLength, MinLength } from "class-validator";
+import { ArrayMaxSize, IsArray, IsBoolean, IsOptional, IsString, MaxLength, MinLength } from "class-validator";
 
 export class CreateRoleDto {
   @IsString() @MinLength(2) @MaxLength(120)
@@ -8,7 +8,7 @@ export class CreateRoleDto {
   description?: string;
 
   /** Initial permission keys (e.g. ["products.view","orders.view"]). */
-  @IsOptional() @IsArray() @IsString({ each: true })
+  @IsOptional() @IsArray() @ArrayMaxSize(500) @IsString({ each: true })
   permissions?: string[];
 }
 
@@ -24,7 +24,7 @@ export class UpdateRoleDto {
 }
 
 export class SetRolePermissionsDto {
-  @IsArray() @IsString({ each: true })
+  @IsArray() @ArrayMaxSize(500) @IsString({ each: true })
   permissions!: string[];
 }
 

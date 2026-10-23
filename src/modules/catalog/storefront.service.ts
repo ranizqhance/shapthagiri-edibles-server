@@ -3,6 +3,7 @@ import { InjectModel } from "@nestjs/sequelize";
 import { Op, Sequelize } from "sequelize";
 import { Brand, Product, ProductVariant, ProductMedia, ShopInventory, Deal } from "@/models";
 import { availabilityOf, sellableInventoryInclude, visibleProductClause } from "./availability";
+import { VARIANT_PUBLIC_ATTRS } from "@/common/security/public-attributes";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -44,7 +45,7 @@ export class StorefrontService {
     // page or the admin screen for the same item.
     const invInclude: any = sellableInventoryInclude(this.isValidShop(shopId) ? shopId : undefined);
     return [
-      { model: this.variant, include: [invInclude] },
+      { model: this.variant, attributes: VARIANT_PUBLIC_ATTRS, include: [invInclude] },
       // Primary image first — the home rails and deals grid read media[0].
       { model: this.media, separate: true, order: [["sortOrder", "ASC"], ["createdAt", "ASC"]] },
       { model: Brand, attributes: ["id", "name"] },

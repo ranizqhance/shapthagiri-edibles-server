@@ -1,3 +1,5 @@
+import { Throttle } from "@nestjs/throttler";
+import { LIMITS } from "@/common/security/throttle";
 import { Body, Controller, Get, Module, Post, Patch, Delete, Param, Query, Headers, Res } from "@nestjs/common";
 import type { Response } from "express";
 import { ApiBearerAuth, ApiTags, PartialType } from "@nestjs/swagger";
@@ -19,8 +21,9 @@ import { RequirePermissions } from "@/common/decorators/permissions.decorator";
 import { Role } from "@/common/enums/role.enum";
 import { CurrentUser } from "@/common/decorators/current-user.decorator";
 import { JwtPayload } from "@/modules/auth/jwt.strategy";
-import { ScheduleReportDto } from "@/common/dto/common.dto";
+import { ScheduleReportDto, TaxPeriodDto, RemitAmountDto, PayoutReferenceDto, SettlementPayDto } from "@/common/dto/common.dto";
 import { ForbiddenException, NotFoundException, BadRequestException } from "@/common/errors/http";
+import { assertPlatformScope } from "@/common/utils/permission.util";
 import { NotificationsService } from "@/modules/notifications/notifications.service";
 import { NotificationsModule } from "@/modules/notifications/notifications.module";
 import { htmlToPdf } from "@/common/utils/pdf.util";
@@ -120,23 +123,28 @@ export class FinanceController {
   // --- Original PNL for Admin ---
   /** Profit & loss. Optional ?from=YYYY-MM-DD&to=YYYY-MM-DD. */
   @Get("pnl")
-  async pnl(@Query("from") from?: string, @Query("to") to?: string) {
+  async pnl(@CurrentUser() u: JwtPayload, @Query("from") from?: string, @Query("to") to?: string) {
+    assertPlatformScope(u);
     return await this.reportService.pnl({ from, to });
   }
 
   @Get("tax")
-  tax1() { return this.taxRecord.findAll({ order: [["period", "DESC"]] }); }
+  tax1(@CurrentUser() u: JwtPayload) {
+    assertPlatformScope(u);
+    return this.taxRecord.findAll({ order: [["period", "DESC"]], limit: 120 }); // ten years of monthly periods
+  }
 
   /** Live per-period rollup straight from orders — the source the log is built from. */
   @Get("tax/rollup")
-  taxRollup(@Query("period") period?: string) {
+  taxRollup(@CurrentUser() u: JwtPayload, @Query("period") period?: string) {
+    assertPlatformScope(u);
     return this.taxService.rollup(period);
   }
 
   /** Recomputes the GST/VAT log. Idempotent; already-remitted periods are preserved. */
   @RequirePermissions('taxes.remit')
   @Post("tax/reconcile")
-  async taxReconcile(@CurrentUser() u: JwtPayload, @Body() b: { period?: string }) {
+  async taxReconcile(@CurrentUser() u: JwtPayload, @Body() b: TaxPeriodDto) {
     const res = await this.taxService.reconcile(b?.period);
     await this.auditLogModel.create({
       actorId: u.sub, action: "tax_reconcile", entity: "TaxRecord", entityId: b?.period ?? "all",
@@ -148,7 +156,7 @@ export class FinanceController {
   /** Marks a tax period filed/remitted. */
   @RequirePermissions('taxes.remit')
   @Post("tax/:id/remit")
-  async taxRemit(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() b: { amount?: number }) {
+  async taxRemit(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() b: RemitAmountDto) {
     const rec = await this.taxService.remit(id, b?.amount);
     await this.auditLogModel.create({
       actorId: u.sub, action: "tax_remit", entity: "TaxRecord", entityId: id,
@@ -163,7 +171,8 @@ export class FinanceController {
    * undefined. Settlements remain available at /finance/settlements.
    */
   @Get("payouts")
-  payouts1() {
+  payouts1(@CurrentUser() u: JwtPayload) {
+    assertPlatformScope(u);
     return DeliveryPayout.findAll({ limit: 100, order: [["createdAt", "DESC"]] });
   }
 
@@ -181,7 +190,8 @@ export class FinanceController {
    * no synthesised rows, no failed capture rendered as an inflow.
    */
   @Get("platform-wallet")
-  async platformWallet() {
+  async platformWallet(@CurrentUser() u: JwtPayload) {
+    assertPlatformScope(u);
     const now = new Date();
     const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
     const nextMonthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
@@ -273,7 +283,7 @@ export class FinanceController {
   /** Records a delivery payout as paid (the money movement itself is out of band). */
   @RequirePermissions('finance.manageWallet')
   @Post("payouts/:id/pay")
-  async payPayout(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() b: { reference?: string }) {
+  async payPayout(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() b: PayoutReferenceDto) {
     const payout = await DeliveryPayout.findByPk(id);
     if (!payout) throw new NotFoundException("NOT_FOUND", "Payout not found");
     if (payout.status === "paid") throw new BadRequestException("CONFLICT", "Payout is already paid");
@@ -299,12 +309,14 @@ export class FinanceController {
   }
 
   @Get("reports")
-  async listReports() {
+  async listReports(@CurrentUser() u: JwtPayload) {
+    assertPlatformScope(u);
     const rows = await this.report.findAll({ order: [["createdAt", "DESC"]], limit: 100 });
     return rows.map((r) => this.serializeReport(r));
   }
 
   /** Runs a scheduled report immediately (same path the cron uses). */
+  @Throttle(LIMITS.export)
   @RequirePermissions('finance.export')
   @Post("reports/:id/run")
   async runReport(@Param("id") id: string) {
@@ -333,7 +345,8 @@ export class FinanceController {
   /** Delivery history for the schedule email-tracking view (admins only). */
   @RequirePermissions('finance.view')
   @Get("email-logs")
-  async emailLogs(@Query("page") page?: string, @Query("limit") limit?: string, @Query("context") context?: string, @Query("status") status?: string) {
+  async emailLogs(@CurrentUser() u: JwtPayload, @Query("page") page?: string, @Query("limit") limit?: string, @Query("context") context?: string, @Query("status") status?: string) {
+    assertPlatformScope(u);
     return this.emailDelivery.history({ page: Number(page), limit: Number(limit), context, status });
   }
 
@@ -569,7 +582,9 @@ export class FinanceController {
       // Multi-shop platform: every settlement carries its originating shop so the
       // Platform Settlements table can label which shop each payout belongs to.
       include: [{ model: Shop, as: "shop", attributes: ["id", "name"] }],
-      order: [["createdAt", "DESC"]]
+      order: [["createdAt", "DESC"]],
+      // Newest first, bounded: the table only grows.
+      limit: 500,
     });
   }
 
@@ -598,6 +613,7 @@ export class FinanceController {
     return settlement;
   }
 
+  @Throttle(LIMITS.export)
   @RequirePermissions('finance.downloadReports')
   @Get("settlements/:id/statement")
   async getSettlementStatement(@CurrentUser() u: JwtPayload, @Param("id") id: string) {
@@ -606,6 +622,7 @@ export class FinanceController {
   }
 
   /** Same statement rendered to a real PDF (streamed binary) for finance archives. */
+  @Throttle(LIMITS.export)
   @RequirePermissions('finance.downloadReports')
   @Get("settlements/:id/statement.pdf")
   async getSettlementStatementPdf(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Res() res: Response) {
@@ -712,7 +729,7 @@ export class FinanceController {
 
   @RequirePermissions('settlement.payout')
   @Post("settlements/:id/pay")
-  async paySettlement(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() body: { payoutRef: string }) {
+  async paySettlement(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() body: SettlementPayDto) {
     // Claim the settlement under a row lock: two clicks (or a retried request)
     // must not both see "not paid yet" and debit the shop twice.
     const claimed = await this.sequelize.transaction(async (t) => {

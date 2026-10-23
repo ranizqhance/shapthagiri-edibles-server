@@ -6,6 +6,7 @@ import { InjectConnection } from "@nestjs/sequelize";
 import { NotificationQueueService } from "../notifications/notification.queue";
 import { NotificationsModule } from "../notifications/notifications.module";
 import { Throttle } from "@nestjs/throttler";
+import { RequirePermissions } from "@/common/decorators/permissions.decorator";
 
 @ApiTags("Health")
 @Controller()
@@ -15,9 +16,23 @@ export class HealthController {
     private queueService: NotificationQueueService,
   ) {}
 
+  /**
+   * Public: a single word. It used to publish uptime, Redis state and BullMQ
+   * job counts to anyone — a free view of restarts, backlog and failures. The
+   * detail now lives behind the settings permission below.
+   */
   @Public()
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Get("health")
   async health() {
+    const queueHealth = await this.queueService.getHealth();
+    return { status: queueHealth.redis === "unhealthy" ? "degraded" : "ok" };
+  }
+
+  /** The dashboard's system-health panel. */
+  @RequirePermissions("settings.view")
+  @Get("health/details")
+  async details() {
     const queueHealth = await this.queueService.getHealth();
     return {
       status: queueHealth.redis === "unhealthy" ? "degraded" : "ok",

@@ -1,3 +1,4 @@
+import { env } from "@/config/env";
 import { Body, Controller, Headers, HttpCode, Post, Req } from "@nestjs/common";
 import { ApiExcludeEndpoint, ApiTags } from "@nestjs/swagger";
 import { RawBodyRequest } from "@nestjs/common";
@@ -76,7 +77,9 @@ export class RazorpayWebhookController {
 
   /** Constant-time HMAC-SHA256 comparison against the shared webhook secret. */
   private isSignatureValid(raw: Buffer, signature?: string): boolean {
-    const secret = process.env.PAYMENT_WEBHOOK_SECRET;
+    // From the validated config, like every other secret: reading process.env
+    // here bypassed the boot-time check that it is set in production.
+    const secret = env.PAYMENT_WEBHOOK_SECRET;
     if (!secret || !signature) return false;
     const expected = crypto.createHmac("sha256", secret).update(raw).digest("hex");
     if (expected.length !== signature.length) return false;
@@ -95,6 +98,14 @@ export class RazorpayWebhookController {
     const payment = await this.pay.findOne({ where: { gatewayReferenceId: entity.order_id } });
     if (!payment) {
       this.logger.warn(`Razorpay captured ${entity.id} but no local payment matches order ${entity.order_id}`);
+      return;
+    }
+    // A signed event proves Razorpay sent it, not that it is for the right
+    // money. The amount (paise) and currency must match the payment we
+    // created, or an order could be settled by a smaller capture.
+    const expectedPaise = Math.round(Number(payment.amount) * 100);
+    if (Number(entity.amount) !== expectedPaise || String(entity.currency ?? "").toUpperCase() !== String(env.PAYMENT_CURRENCY).toUpperCase()) {
+      this.logger.error(`Razorpay capture ${entity.id} for order ${entity.order_id} does not match payment ${payment.id}: got ${entity.amount} ${entity.currency}, expected ${expectedPaise} ${env.PAYMENT_CURRENCY} — not settled`);
       return;
     }
     if (entity.id && payment.gatewayRef !== entity.id) {

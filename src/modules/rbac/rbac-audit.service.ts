@@ -7,6 +7,11 @@ export interface AuditContext {
   ip?: string | null;
   userAgent?: string | null;
   correlationId?: string | null;
+  /**
+   * The acting user's own permission keys, for the rule that nobody may grant
+   * what they do not hold. Set by every request-driven caller.
+   */
+  actorPermissions?: string[];
 }
 
 /** RBAC audit action names — every RBAC mutation maps to exactly one. */

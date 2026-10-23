@@ -1,3 +1,5 @@
+import { Throttle } from "@nestjs/throttler";
+import { LIMITS } from "@/common/security/throttle";
 import { Controller, Get, Module, Query, Req } from "@nestjs/common";
 import { ApiTags } from "@nestjs/swagger";
 import { InjectModel, SequelizeModule } from "@nestjs/sequelize";
@@ -5,6 +7,7 @@ import { Op, Sequelize } from "sequelize";
 import { Product, SearchQuery, Brand, Category, ProductVariant, ProductMedia } from "@/models";
 import { Public } from "@/common/decorators/public.decorator";
 import { visibleProductClause } from "@/modules/catalog/availability";
+import { VARIANT_PUBLIC_ATTRS } from "@/common/security/public-attributes";
 
 @ApiTags("Search")
 @Controller("search")
@@ -30,13 +33,17 @@ export class SearchController {
     ];
   }
 
+  @Throttle(LIMITS.search)
   @Public() @Get("products") async products(@Query("q") q: string, @Req() req: any, @Query("shopId") shopId?: string) {
-    const term = (q ?? "").trim();
+    // Clipped: a search term past 100 characters is not a product search, and
+    // the log column holds 200 — longer input used to fail the insert with a
+    // 500 after the search had already run.
+    const term = String(q ?? "").trim().slice(0, 100);
     const rows = term ? await this.product.findAll({
       include: [
         { model: Brand, as: "brand", attributes: ["name"] },
         { model: Category, as: "category", attributes: ["name"] },
-        { model: ProductVariant },
+        { model: ProductVariant, attributes: VARIANT_PUBLIC_ATTRS },
         { model: ProductMedia },
       ],
       where: { status: "published",
@@ -51,10 +58,14 @@ export class SearchController {
       limit: 30,
       subQuery: false,
     }) : [];
-    await this.query.create({ userId: req.user?.sub ?? null, query: term, resultsCount: rows.length } as any);
+    // Anonymous input, written on every call: nothing for an empty search, and
+    // the text is shown back to staff and on /search/popular — rendered as
+    // text there (React escapes it), never as HTML.
+    if (term) await this.query.create({ userId: req.user?.sub ?? null, query: term, resultsCount: rows.length } as any);
     return rows;
   }
 
+  @Throttle(LIMITS.search)
   @Public() @Get("suggestions") sugg(@Query("q") q: string, @Query("shopId") shopId?: string) {
     const term = (q ?? "").trim();
     if (!term) return [];
@@ -65,6 +76,7 @@ export class SearchController {
     });
   }
 
+  @Throttle(LIMITS.search)
   @Public() @Get("popular") popular() {
     return this.query.findAll({
       attributes: ["query", [this.query.sequelize!.fn("COUNT", this.query.sequelize!.col("query")), "count"]],

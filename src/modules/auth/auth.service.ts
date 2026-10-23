@@ -6,7 +6,7 @@ import { Role } from "@/common/enums/role.enum";
 import { hashPassword, comparePassword } from "@/common/utils/password.util";
 import { signAccess, signRefresh, verifyRefresh } from "@/common/utils/jwt.util";
 import { InvalidCredentialsException } from "@/common/errors/domain";
-import { BadRequestException } from "@/common/errors/http";
+import { BadRequestException, ConflictException } from "@/common/errors/http";
 import { smsProvider } from "@/common/providers/sms.provider";
 import { emailProvider } from "@/common/providers/email.provider";
 import { env } from "@/config/env";
@@ -40,6 +40,10 @@ const OTP_MAX_ATTEMPTS = 5;
  */
 const REFRESH_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 
+/** A real bcrypt hash at the same cost, compared against when there is no account. */
+let dummy: Promise<string> | null = null;
+const dummyHash = () => (dummy ??= hashPassword(crypto.randomBytes(16).toString("hex")));
+
 /** Sessions store a hash, never the token itself. */
 const hashToken = (token: string): string =>
   createHash("sha256").update(token).digest("hex");
@@ -51,7 +55,7 @@ const OTP_PURPOSE_CHECKOUT = "checkout";
 
 @Injectable()
 export class AuthService {
-  private failedAttempts = new Map<string, number>();
+  private failedAttempts = new Map<string, { count: number; first: number }>();
   private readonly logger = new Logger(AuthService.name);
 
   constructor(
@@ -94,24 +98,38 @@ export class AuthService {
    * Resolve a Firebase-verified phone to an account, creating one if needed.
    *
    * Shared by registration and checkout so there is exactly one place where a
-   * verified phone turns into a session. Matching is by phone first, then by
-   * email, so a customer who signed up with email and later uses phone OTP
-   * lands on the same account instead of getting a duplicate.
+   * verified phone turns into a session.
+   *
+   * An existing account is matched ONLY by something the caller just proved:
+   * the phone in the Firebase token, or an email the token itself carries as
+   * verified. The `email` typed into the registration form proves nothing, so
+   * it may name a NEW account but never select an existing one. Matching on it
+   * used to hand a session for any account to whoever typed its address next
+   * to a fresh phone number.
    *
    * Phone-only signups have no real email, so they get a synthetic one to
    * satisfy the NOT NULL + UNIQUE constraint on users.email. Nothing may be
    * mailed to it — see isDeliverableEmail() in the notification queue.
    */
   private async findOrCreateFromPhone(
-    decoded: { uid: string; phone: string | null; email: string | null },
+    decoded: { uid: string; phone: string | null; email: string | null; emailVerified?: boolean },
     name?: string,
     emailOverride?: string,
   ): Promise<User> {
     const phone = decoded.phone;
-    const email = decoded.email ?? emailOverride ?? `${decoded.uid}@firebase.user`;
+    const provenEmail = decoded.email && decoded.emailVerified ? decoded.email.toLowerCase().trim() : null;
+    const typedEmail = emailOverride ? emailOverride.toLowerCase().trim() : null;
+    const email = provenEmail ?? typedEmail ?? `${decoded.uid}@firebase.user`;
 
     let user = phone ? await this.userModel.findOne({ where: { phone } }) : null;
-    if (!user) user = await this.userModel.findOne({ where: { email } });
+    if (!user && provenEmail) user = await this.userModel.findOne({ where: { email: provenEmail } });
+
+    if (!user && !provenEmail && typedEmail && (await this.userModel.findOne({ where: { email: typedEmail } }))) {
+      throw new ConflictException(
+        "CONFLICT",
+        "An account already exists for this email. Sign in with that email first, then add your mobile number from your profile.",
+      );
+    }
 
     if (user) {
       // They just proved they hold this number. An older account may predate
@@ -129,10 +147,13 @@ export class AuthService {
       name: name?.trim() || "Customer",
       email,
       phone,
-      passwordHash: await hashPassword(`firebase_${decoded.uid}`),
+      // Random, and told to nobody. It used to be `firebase_<uid>`, and the uid
+      // is also spelled out in the synthetic email — so the email/password
+      // login accepted anyone who learned a uid. These accounts sign in by OTP.
+      passwordHash: await hashPassword(crypto.randomBytes(32).toString("base64url")),
       role: Role.CUSTOMER,
       phoneVerified: !!phone,
-      emailVerified: !!decoded.email,
+      emailVerified: !!provenEmail,
     } as any);
 
     // Notify admins of new registration
@@ -169,12 +190,12 @@ export class AuthService {
     const emailKey = dto.email.toLowerCase();
     const user = await this.userModel.scope("withPassword").findOne({ where: { email: emailKey } });
     this.logger.debug('Login attempt', { email: emailKey, userFound: !!user, isActive: user?.isActive });
-    if (!user) {
-      await this.trackFailedLogin(emailKey);
-      throw new InvalidCredentialsException();
-    }
-    if (!user.isActive) {
-      await this.trackFailedLogin(emailKey, user.id);
+    // Same work for every answer. Returning before bcrypt ran made an unknown
+    // or deactivated address answer ~200 ms faster than a wrong password —
+    // a timing oracle for which addresses have accounts.
+    if (!user || !user.isActive) {
+      await comparePassword(dto.password, await dummyHash());
+      await this.trackFailedLogin(emailKey, user?.id);
       throw new InvalidCredentialsException();
     }
     let ok: boolean;
@@ -192,10 +213,25 @@ export class AuthService {
     return this.issueTokens(user);
   }
 
+  /**
+   * Count failures per address so admins hear about a run of them. Alerting
+   * only — never a lockout (that would let anyone lock a customer out by
+   * guessing at their address); the rate limiter is what slows guessing.
+   *
+   * Bounded: keyed by an address the caller types, an unbounded map grew one
+   * entry per guessed address for the life of the process. Entries expire with
+   * the login throttle window, and the oldest are dropped past a cap.
+   */
   private async trackFailedLogin(email: string, userId?: string) {
-    const count = (this.failedAttempts.get(email) || 0) + 1;
-    this.failedAttempts.set(email, count);
-    
+    const WINDOW_MS = 15 * 60 * 1000;
+    const CAP = 10_000;
+    const now = Date.now();
+    const prev = this.failedAttempts.get(email);
+    const count = prev && now - prev.first < WINDOW_MS ? prev.count + 1 : 1;
+    this.failedAttempts.delete(email); // re-insert so Map order stays oldest-first
+    this.failedAttempts.set(email, { count, first: prev && count > 1 ? prev.first : now });
+    while (this.failedAttempts.size > CAP) this.failedAttempts.delete(this.failedAttempts.keys().next().value as string);
+
     if (count === 5) {
       this.eventEmitter.emit("admin.notify", {
         eventType: NotificationEventType.MULTIPLE_FAILED_LOGINS, 
@@ -222,49 +258,61 @@ export class AuthService {
    * working sessions.
    */
   async refresh(refreshToken: string, meta?: { ip?: string; device?: string }) {
-    const payload = verifyRefresh(refreshToken);
+    let payload: ReturnType<typeof verifyRefresh>;
+    try {
+      payload = verifyRefresh(refreshToken);
+    } catch {
+      // Bad signature, expired, or an access token offered as a refresh token.
+      throw new InvalidCredentialsException();
+    }
     const user = await this.userModel.findByPk(payload.sub);
     if (!user || !user.isActive) throw new InvalidCredentialsException();
     // tokenVersion still revokes everything at once (logout, password change).
     if ((payload.tv ?? 0) !== user.tokenVersion) throw new InvalidCredentialsException();
 
     const presentedHash = hashToken(refreshToken);
-    const session = await this.sessionModel.findOne({
-      where: { userId: user.id, refreshTokenHash: presentedHash },
+
+    /*
+     * Check-and-spend under a row lock. Two refreshes racing with the same
+     * token both used to read it as unspent and both got a new pair — a
+     * stolen copy used at the same moment as the real one went unnoticed.
+     *
+     * Outcomes are returned, not thrown: throwing inside the transaction
+     * would roll back the very revocation a reuse has to commit.
+     */
+    const outcome = await this.sessionModel.sequelize!.transaction(async (t) => {
+      const session = await this.sessionModel.findOne({
+        where: { userId: user.id, refreshTokenHash: presentedHash },
+        lock: t.LOCK.UPDATE,
+        transaction: t,
+      });
+
+      // A valid signature with no session row used to be "adopted" and
+      // honoured, so a token whose row was never written (or was pruned)
+      // could be replayed until it expired. Every live token has a row.
+      if (!session) return "unknown" as const;
+
+      if (session.revoked) {
+        // A spent token, presented again: someone holds a copy. Revoke every
+        // session and bump tokenVersion so their access tokens die too.
+        await this.sessionModel.update({ revoked: true }, { where: { userId: user.id }, transaction: t });
+        await this.userModel.increment("tokenVersion", { where: { id: user.id }, transaction: t });
+        return "reuse" as const;
+      }
+
+      if (session.expiresAt.getTime() < Date.now()) {
+        await session.update({ revoked: true }, { transaction: t });
+        return "expired" as const;
+      }
+
+      // Spend this one; the next is issued after commit.
+      await session.update({ revoked: true }, { transaction: t });
+      return "ok" as const;
     });
 
-    if (!session) {
-      /*
-       * Unknown token for a valid signature. Either it was issued before
-       * sessions existed — in which case accepting it once and recording a
-       * session is the migration path — or it has already been rotated away
-       * and the row was pruned. Treated as the former, because signing every
-       * existing user out on deploy is a worse first impression than a brief
-       * window where one legacy token still works.
-       */
-      this.logger.warn(`Refresh presented with no session row (user ${user.id}) — adopting it`);
-      return this.issueTokens(user, meta);
-    }
-
-    if (session.revoked) {
-      /*
-       * A spent token, presented again. Someone has a copy they should not.
-       * Revoke every session this user holds and bump tokenVersion so their
-       * access tokens die too.
-       */
-      this.logger.error(`Refresh token REUSE detected for user ${user.id} — revoking all sessions`);
-      await this.sessionModel.update({ revoked: true }, { where: { userId: user.id } });
-      await this.userModel.increment("tokenVersion", { where: { id: user.id } });
-      throw new InvalidCredentialsException();
-    }
-
-    if (session.expiresAt.getTime() < Date.now()) {
-      await session.update({ revoked: true });
-      throw new InvalidCredentialsException();
-    }
-
-    // Spend this one, then issue the next.
-    await session.update({ revoked: true });
+    if (outcome === "reuse") this.logger.error(`Refresh token REUSE detected for user ${user.id} — all sessions revoked`);
+    if (outcome === "unknown") this.logger.warn(`Refresh presented with no session row (user ${user.id}) — refused`);
+    if (outcome !== "ok") throw new InvalidCredentialsException();
     return this.issueTokens(user, meta);
   }
 
@@ -492,17 +540,30 @@ export class AuthService {
   /** Verify the emailed OTP; on success create the account (single-use) and issue tokens. */
   async verifyRegistrationEmailOtp(email: string, code: string, name: string, phone?: string) {
     const emailKey = email.toLowerCase().trim();
+    const phoneKey = phone?.trim() || null;
+
+    // The code proves the email, not the phone typed beside it. A number that
+    // already belongs to an account must never select that account: matching on
+    // it handed a session for any account to whoever typed its number here.
+    // Checked before the code is burnt, so the customer can retry without it.
+    if (phoneKey && (await this.userModel.findOne({ where: { phone: phoneKey } }))) {
+      throw new ConflictException(
+        "CONFLICT",
+        "This mobile number is already registered. Sign in with it instead, or leave it out to continue.",
+      );
+    }
+
     await this.consumeOtp(emailKey, OTP_PURPOSE_REGISTER, code);
 
     // Guard against a race: someone may have registered this email meanwhile.
+    // The code just proved this address, so signing into it is correct.
     let user = await this.userModel.findOne({ where: { email: emailKey } });
-    if (!user && phone) user = await this.userModel.findOne({ where: { phone } });
 
     if (!user) {
       user = await this.userModel.create({
         name: name?.trim() || "Customer",
         email: emailKey,
-        phone: phone?.trim() || null,
+        phone: phoneKey,
         // Random password — OTP-verified accounts sign in via OTP, not password;
         // they can set one later via forgot-password.
         passwordHash: await hashPassword(crypto.randomBytes(24).toString("hex")),

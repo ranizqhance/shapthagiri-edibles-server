@@ -1,3 +1,5 @@
+import { Throttle } from "@nestjs/throttler";
+import { LIMITS } from "@/common/security/throttle";
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Ip } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { InjectModel } from "@nestjs/sequelize";
@@ -9,11 +11,12 @@ import { WILDCARD_PERMISSION } from "@/modules/rbac/rbac.catalog";
 import { RequirePermissions, RequireAnyPermission } from "@/common/decorators/permissions.decorator";
 import { Public } from "@/common/decorators/public.decorator";
 import { Role } from "@/common/enums/role.enum";
+import { shopScope } from "@/common/utils/permission.util";
 import { CurrentUser } from "@/common/decorators/current-user.decorator";
 import { JwtPayload } from "@/modules/auth/jwt.strategy";
 import { PageOptionsDto } from "@/common/dto/page-options.dto";
 import { paginate, findOr404, findByIdOrSlugOr404 } from "@/common/utils/crud.util";
-import { BrandDto, UpdateBrandDto, CategoryDto, UpdateCategoryDto, CompareDto, MediaDto, ProductDto, VariantDto } from "@/common/dto/common.dto";
+import { BrandDto, UpdateBrandDto, CategoryDto, UpdateCategoryDto, CompareDto, MediaDto, ProductDto, VariantDto, SortOrderDto, MoveCategoryDto } from "@/common/dto/common.dto";
 import { NotificationsService } from "../notifications/notifications.service";
 import { CacheService } from "../../services/cache.service";
 import { CategoriesService } from "@/modules/catalog/categories.service";
@@ -25,6 +28,7 @@ import { ProductPolicyService } from "./product-policy.service";
 import { PolicyResolutionService } from "@/modules/returns/policy-resolution.service";
 import { ReviewsService } from "@/modules/reviews/reviews.service";
 import { StorefrontService } from "./storefront.service";
+import { VARIANT_PUBLIC_ATTRS } from "@/common/security/public-attributes";
 import {
   availabilityOf,
   sellableInventoryInclude,
@@ -42,6 +46,18 @@ function sellerOf(inventory: ShopInventory[], variants: ProductVariant[]): { id:
   const shop = (row as any)?.shop;
   return shop ? { id: shop.id, name: shop.name } : null;
 }
+
+/**
+ * Query values that end up inside SQL literals in the listing filters. They
+ * were coerced with Number(), so never injectable, but "abc", "Infinity" or
+ * "1e999" became NaN/Infinity in the SQL text and the query failed with a 500.
+ * Only a finite number turns a filter on.
+ */
+/** A copy of a plain row without the named keys. */
+const omit = <T extends Record<string, any>>(row: T, ...keys: string[]): T => { const out: any = { ...row }; for (const k of keys) delete out[k]; return out; };
+const isFiniteNum = (v?: string): boolean => v !== undefined && v !== "" && Number.isFinite(Number(v));
+/** A malformed id in a comma list is dropped instead of failing the query. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 @ApiTags("Catalog")
 @Controller("catalog")
@@ -79,10 +95,12 @@ export class CatalogController {
     // runs four correlated subqueries per published product (sales, wishlist
     // count, review count, average rating) just to rank them. Cached per shop
     // and size; dropped whenever a product changes.
-    const key = `storefront:trending:${shopId || "all"}:${n}`;
+    // Only a well-formed shop id reaches the key or the query.
+    const shop = shopId && UUID_RE.test(shopId) ? shopId : undefined;
+    const key = `storefront:trending:${shop || "all"}:${n}`;
     const cached = this.cacheService.get<{ items: any[] }>(key);
     if (cached) return cached;
-    const payload = { items: await this.storefront.trending(shopId, n) };
+    const payload = { items: await this.storefront.trending(shop, n) };
     this.cacheService.set(key, payload);
     return payload;
   }
@@ -96,10 +114,11 @@ export class CatalogController {
   @Get("deals")
   async deals(@Query("shopId") shopId?: string, @Query("limit") limit?: string) {
     const n = Math.min(Math.max(Number(limit) || 8, 1), 24);
-    const key = `storefront:deals:${shopId || "all"}:${n}`;
+    const shop = shopId && UUID_RE.test(shopId) ? shopId : undefined;
+    const key = `storefront:deals:${shop || "all"}:${n}`;
     const cached = this.cacheService.get<{ items: any[] }>(key);
     if (cached) return cached;
-    const payload = { items: await this.storefront.deals(shopId, n) };
+    const payload = { items: await this.storefront.deals(shop, n) };
     this.cacheService.set(key, payload);
     return payload;
   }
@@ -181,12 +200,13 @@ export class CatalogController {
   @ApiBearerAuth()
   @RequirePermissions('categories.edit')
   @Patch('categories/:id/move')
-  async moveCategory(@Param('id') id: string, @Body('parentId') parentId: string | null) {
-    const cat = await this.categoriesService.move(id, parentId);
+  async moveCategory(@Param('id') id: string, @Body() b: MoveCategoryDto) {
+    const cat = await this.categoriesService.move(id, b.parentId ?? null);
     this.cacheService.invalidatePrefix('categoriesTree');
     return cat;
   }
 
+  @Throttle(LIMITS.search)
   @ApiBearerAuth()
   @RequirePermissions()
   @RequireAnyPermission('products.manageVariants', 'products.view', 'coupons.view', 'marketing.view', 'inventory.view')
@@ -371,12 +391,12 @@ export class CatalogController {
       // Match products DIRECTLY assigned to the given category only — do not
       // roll up descendant categories. A product assigned to a sub-category such as
       // "Roasted Coconut Oil" appears under "Roasted Coconut Oil", never under its parent "Coconut Oil".
-      const categoryIdList = categoryId.split(',').map(s => s.trim()).filter(Boolean);
+      const categoryIdList = categoryId.split(',').map(s => s.trim()).filter((s) => UUID_RE.test(s));
       where.categoryId = { [Op.in]: categoryIdList };
     }
     if (brandId) where.brandId = brandId;
 
-    if (maxPrice) {
+    if (isFiniteNum(maxPrice)) {
       andConditions.push(
         Sequelize.literal(
           `EXISTS (SELECT 1 FROM "product_variants" WHERE "product_variants"."productId" = "Product"."id" AND "product_variants"."defaultPrice" <= ${Number(maxPrice)})`
@@ -394,7 +414,7 @@ export class CatalogController {
       );
     }
 
-    if (minDiscount) {
+    if (isFiniteNum(minDiscount)) {
       andConditions.push(
         Sequelize.literal(
           `EXISTS (SELECT 1 FROM "product_variants" WHERE "product_variants"."productId" = "Product"."id" AND "product_variants"."mrp" > 0 AND (("product_variants"."mrp" - "product_variants"."defaultPrice") / "product_variants"."mrp" * 100) >= ${Number(minDiscount)})`
@@ -402,7 +422,7 @@ export class CatalogController {
       );
     }
 
-    if (minRating) {
+    if (isFiniteNum(minRating)) {
       andConditions.push(
         Sequelize.literal(
           // Was COALESCE(..., 4.0): every unreviewed product silently satisfied
@@ -518,12 +538,12 @@ export class CatalogController {
       // Match products DIRECTLY assigned to the given category only — do not
       // roll up descendant categories. A product assigned to a sub-category such as
       // "Roasted Coconut Oil" appears under "Roasted Coconut Oil", never under its parent "Coconut Oil".
-      const categoryIdList = categoryId.split(',').map(s => s.trim()).filter(Boolean);
+      const categoryIdList = categoryId.split(',').map(s => s.trim()).filter((s) => UUID_RE.test(s));
       where.categoryId = { [Op.in]: categoryIdList };
     }
     if (brandId) where.brandId = brandId;
 
-    if (maxPrice) {
+    if (isFiniteNum(maxPrice)) {
       andConditions.push(
         Sequelize.literal(
           `EXISTS (SELECT 1 FROM "product_variants" WHERE "product_variants"."productId" = "Product"."id" AND "product_variants"."defaultPrice" <= ${Number(maxPrice)})`
@@ -541,7 +561,7 @@ export class CatalogController {
       );
     }
 
-    if (minDiscount) {
+    if (isFiniteNum(minDiscount)) {
       andConditions.push(
         Sequelize.literal(
           `EXISTS (SELECT 1 FROM "product_variants" WHERE "product_variants"."productId" = "Product"."id" AND "product_variants"."mrp" > 0 AND (("product_variants"."mrp" - "product_variants"."defaultPrice") / "product_variants"."mrp" * 100) >= ${Number(minDiscount)})`
@@ -549,7 +569,7 @@ export class CatalogController {
       );
     }
 
-    if (minRating) {
+    if (isFiniteNum(minRating)) {
       andConditions.push(
         Sequelize.literal(
           // Was COALESCE(..., 4.0): every unreviewed product silently satisfied
@@ -570,7 +590,7 @@ export class CatalogController {
   @Public() @Get("products/:id") async productDetail(@Param("id") id: string, @Query("shopId") shopId?: string) {
     const product = await findByIdOrSlugOr404<Product>(this.product, id, "Product");
     const brand = product.brandId ? await this.brand.findByPk(product.brandId, { attributes: ["id", "name"] }) : null;
-    const variants = await this.variant.findAll({ where: { productId: product.id } });
+    const variants = await this.variant.findAll({ where: { productId: product.id }, attributes: VARIANT_PUBLIC_ATTRS });
     const media = await this.media.findAll({
       where: { productId: product.id },
       // Primary first, so the gallery opens on the image the admin chose.
@@ -656,7 +676,8 @@ export class CatalogController {
     const soldCount = Number(soldRows?.[0]?.sold ?? 0);
 
     return {
-      product: { ...product.toJSON(), brand: brand?.toJSON() ?? null, rating: ratingSummary.average, reviewCount: ratingSummary.count, soldCount },
+      // Not `submittedBy`: which staff account created a product is not shoppers' business.
+      product: { ...omit(product.toJSON(), "submittedBy"), brand: brand?.toJSON() ?? null, rating: ratingSummary.average, reviewCount: ratingSummary.count, soldCount },
       variants: variantsWithInv,
       media,
       totalStock,
@@ -700,8 +721,10 @@ export class CatalogController {
         productId: product.id,
       } as any);
 
-      // Resolve shop IDs — prefer the multi-select array, fall back to single shopId
-      const allShopIds = shopIds?.length ? shopIds : shopId ? [shopId] : [];
+      // Resolve shop IDs — prefer the multi-select array, fall back to single shopId.
+      // A shop account stocks its own shop only, whatever the form sent.
+      const scope = shopScope(u);
+      const allShopIds = scope ? [scope] : shopIds?.length ? shopIds : shopId ? [shopId] : [];
       for (const sid of allShopIds) {
         // Base stock → quantity; base price → priceOverride (per-shop selling
         // price). Reuses the same ShopInventory row the inventory module manages.
@@ -782,16 +805,24 @@ export class CatalogController {
         await variant.update(updateData);
       }
 
-      // Resolve desired shop set from the multi-select array or single shopId
-      const desiredShopIds: string[] = shopIds?.length ? shopIds : shopId ? [shopId] : [];
+      // Resolve desired shop set from the multi-select array or single shopId.
+      // A shop account only ever touches its own shop's row: the "remove shops
+      // no longer selected" step below used to delete OTHER shops' inventory
+      // when a manager saved the form.
+      const scope = shopScope(u);
+      const cleared = (shopIds !== undefined && !shopIds?.length) || shopId === null || shopId === "";
+      const mentioned = shopIds !== undefined || shopId !== undefined;
+      const desiredShopIds: string[] = scope
+        ? (mentioned && !cleared ? [scope] : [])
+        : shopIds?.length ? shopIds : shopId ? [shopId] : [];
       // Only touch stock/price when explicitly provided, so a plain title edit
       // does not zero existing inventory.
       const invUpdate: any = {};
       if (baseStock !== undefined) invUpdate.quantity = baseStock;
       if (defaultPrice !== undefined) invUpdate.priceOverride = defaultPrice;
       if (desiredShopIds.length > 0) {
-        // Remove shops no longer in the desired set
-        await this.inv.destroy({ where: { variantId: variant.id, shopId: { [Op.notIn]: desiredShopIds } } });
+        // Remove shops no longer in the desired set (platform staff only).
+        if (!scope) await this.inv.destroy({ where: { variantId: variant.id, shopId: { [Op.notIn]: desiredShopIds } } });
         // Ensure each desired shop has an inventory row, carrying base stock/price
         for (const sid of desiredShopIds) {
           const [invRow, invCreated] = await this.inv.findOrCreate({
@@ -809,8 +840,8 @@ export class CatalogController {
           }
         }
       } else if (shopIds !== undefined || shopId === null || shopId === "") {
-        // Explicitly cleared — remove all shop associations
-        await this.inv.destroy({ where: { variantId: variant.id } });
+        // Explicitly cleared — remove the shop associations this caller owns.
+        await this.inv.destroy({ where: { variantId: variant.id, ...(scope ? { shopId: scope } : {}) } });
       }
     }
 
@@ -828,6 +859,16 @@ export class CatalogController {
       throw new Error("Sequelize instance not available on model");
     }
     const before = await this.product.findByPk(id);
+    // Deleting a product removes it from every shop. A shop account may do that
+    // only to a product no other shop stocks.
+    const scope = shopScope(u);
+    if (scope) {
+      const elsewhere = await this.inv.count({
+        where: { shopId: { [Op.ne]: scope } },
+        include: [{ model: this.variant, as: "variant", attributes: [], required: true, where: { productId: id } }],
+      });
+      if (elsewhere > 0) throw new ForbiddenException("AUTH_FORBIDDEN", "Another shop stocks this product, so only an administrator can delete it.");
+    }
     await sequelize.transaction(async (t) => {
       const variants = await this.variant.findAll({ where: { productId: id }, transaction: t });
       const variantIds = variants.map(v => v.id);
@@ -921,7 +962,7 @@ export class CatalogController {
 
   @ApiBearerAuth() @RequirePermissions('products.manageImages') @Post("products/:id/media/reorder") async reorderMedia(
     @Param("id") id: string,
-    @Body() b: { items: { id: string; sortOrder: number }[] }
+    @Body() b: SortOrderDto
   ) {
     for (const item of b.items) {
       await this.media.update({ sortOrder: item.sortOrder }, { where: { id: item.id, productId: id } });
@@ -945,7 +986,7 @@ export class CatalogController {
         [Op.and]: [visibleProductClause()],
       },
       include: [
-        { model: this.variant, include: [sellableInventoryInclude()] },
+        { model: this.variant, attributes: VARIANT_PUBLIC_ATTRS, include: [sellableInventoryInclude()] },
         this.media,
       ],
       limit: 8,

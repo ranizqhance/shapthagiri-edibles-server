@@ -4,6 +4,7 @@ import { ServeStaticModule } from '@nestjs/serve-static';
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from "@nestjs/core";
 import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
 import { ThrottlerStorageRedisService } from "@nest-lab/throttler-storage-redis";
+import { identityOf, optedIn, sessionOf } from "./common/security/throttle";
 import Redis from "ioredis";
 import { env } from "./config/env";
 import { EventEmitterModule } from "@nestjs/event-emitter";
@@ -79,6 +80,19 @@ import { AppCacheModule } from "./services/cache.module";
         {
           name: "write", ttl: 60_000, limit: 30,
           skipIf: (ctx) => ["GET", "HEAD", "OPTIONS"].includes(ctx.switchToHttp().getRequest().method),
+        },
+        // Per account (email/phone in the body) — counted only on routes that
+        // opt in with @Throttle({ identity }). See common/security/throttle.ts.
+        {
+          name: "identity", ttl: 60_000, limit: 1_000_000,
+          getTracker: (req) => identityOf(req) ?? "",
+          skipIf: (ctx) => !optedIn(ctx, "identity") || !identityOf(ctx.switchToHttp().getRequest()),
+        },
+        // Per session — counted only on routes that opt in with @Throttle({ user }).
+        {
+          name: "user", ttl: 60_000, limit: 1_000_000,
+          getTracker: (req) => sessionOf(req),
+          skipIf: (ctx) => !optedIn(ctx, "user"),
         },
       ],
       storage: env.REDIS_ENABLED

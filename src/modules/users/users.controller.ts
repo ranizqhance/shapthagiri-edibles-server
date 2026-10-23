@@ -9,7 +9,7 @@ import { PageOptionsDto } from "@/common/dto/page-options.dto";
 import { paginate, findOr404 } from "@/common/utils/crud.util";
 import { AddressDto, UpdateAddressDto, PaymentMethodDto, UpdateProfileDto } from "@/common/dto/common.dto";
 import { normalizeEmail } from "@/common/utils/email.util";
-import { ConflictException } from "@/common/errors/http";
+import { ConflictException, NotFoundException } from "@/common/errors/http";
 
 @ApiTags("Users")
 @ApiBearerAuth()
@@ -57,14 +57,35 @@ export class UsersController {
       }
     }
 
+    // The phone is proof of identity too: phone OTP signs in to whichever
+    // account holds the number, and cash on delivery trusts phoneVerified. A
+    // number typed here is unproven, so it clears the flag — it used to carry
+    // the old number's verification over to any number the customer chose.
+    if (typeof body.phone === "string") {
+      const phone = body.phone.trim() || null;
+      const current = await this.userModel.findByPk(u.sub);
+      if (!current || phone === (current.phone ?? null)) {
+        delete patch.phone;
+      } else {
+        if (phone && (await this.userModel.findOne({ where: { phone, id: { [Op.ne]: u.sub } } }))) {
+          throw new ConflictException("CONFLICT", "That mobile number is already used by another account.");
+        }
+        patch.phone = phone;
+        patch.phoneVerified = false;
+      }
+    }
+
     if (Object.keys(patch).length === 0) return this.userModel.findByPk(u.sub);
 
     try {
       await this.userModel.update(patch, { where: { id: u.sub } });
     } catch (e: any) {
-      // Two people submitting the same new address at once lose the race on the
-      // unique index instead of the check above. Same answer, not a 500.
+      // Two people submitting the same new address or number at once lose the
+      // race on the unique index instead of the checks above. Same answer, not a 500.
       if (e?.name === "SequelizeUniqueConstraintError") {
+        if (e?.fields && "phone" in e.fields) {
+          throw new ConflictException("CONFLICT", "That mobile number is already used by another account.");
+        }
         throw new ConflictException(
           "AUTH_EMAIL_TAKEN",
           "That email is already used by another account.",
@@ -97,6 +118,12 @@ export class UsersController {
   async updateAddress(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() body: UpdateAddressDto) {
     const sequelize = this.addressModel.sequelize!;
     return sequelize.transaction(async (t) => {
+      // The update below was already scoped to the caller, but the row it
+      // returned was read by id alone — so PATCHing any address id returned
+      // that stranger's full address. Resolve ownership first; "not yours"
+      // and "no such address" are the same 404.
+      const own = await this.addressModel.findOne({ where: { id, userId: u.sub }, transaction: t });
+      if (!own) throw new NotFoundException("NOT_FOUND", "Address not found");
       // Promoting this address to default demotes every other one. Covers the
       // "Set default" action too (it PATCHes isDefault: true here).
       if (body.isDefault) {
@@ -106,7 +133,7 @@ export class UsersController {
         );
       }
       await this.addressModel.update(body, { where: { id, userId: u.sub }, transaction: t });
-      return this.addressModel.findByPk(id, { transaction: t });
+      return this.addressModel.findOne({ where: { id, userId: u.sub }, transaction: t });
     });
   }
 
@@ -133,8 +160,11 @@ export class UsersController {
   }
 
   @Post("me/payment-methods")
-  addPm(@CurrentUser() u: JwtPayload, @Body() body: PaymentMethodDto) {
-    return this.pmModel.create({ ...body, userId: u.sub } as any);
+  async addPm(@CurrentUser() u: JwtPayload, @Body() body: PaymentMethodDto) {
+    const pm = await this.pmModel.create({ ...body, userId: u.sub } as any);
+    // Same columns the list returns: the gateway token stays server-side.
+    const { gatewayToken, ...safe } = pm.toJSON() as any;
+    return safe;
   }
 
   @Delete("me/payment-methods/:id")

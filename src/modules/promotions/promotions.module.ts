@@ -1,3 +1,5 @@
+import { Throttle } from "@nestjs/throttler";
+import { LIMITS } from "@/common/security/throttle";
 import { Body, Controller, Get, Module, Param, Post, Put, Delete, Query, UseGuards, forwardRef } from "@nestjs/common";
 // App error classes — the global filter renders raw NestJS HttpExceptions as 500.
 import { BadRequestException, NotFoundException } from "@/common/errors/http";
@@ -11,7 +13,7 @@ import { CurrentUser } from "@/common/decorators/current-user.decorator";
 import { JwtPayload } from "@/modules/auth/jwt.strategy";
 import { PageOptionsDto } from "@/common/dto/page-options.dto";
 import { paginate } from "@/common/utils/crud.util";
-import { CampaignDto, CartCouponApplyDto, EligibleCouponsDto, CouponDto, UpdateCouponDto, GiftCardDto, LoyaltyAdjustDto, DealDto, UpdateDealDto, PromotionDto, UpdatePromotionDto, ResolvePromotionsDto, OrchestratePreviewDto } from "@/common/dto/common.dto";
+import { CampaignDto, CartCouponApplyDto, EligibleCouponsDto, CouponDto, UpdateCouponDto, GiftCardDto, LoyaltyAdjustDto, DealDto, UpdateDealDto, PromotionDto, UpdatePromotionDto, ResolvePromotionsDto, OrchestratePreviewDto, EngineToggleDto, PromotionListQueryDto, ProductOffersDto } from "@/common/dto/common.dto";
 import { PromotionsService } from "./promotions.service";
 import { LoyaltyService } from "./loyalty.service";
 import { DealsService } from "./deals.service";
@@ -78,6 +80,7 @@ export class PromotionsController {
     return this.promotions.getCouponDetails(id);
   }
 
+  @Throttle(LIMITS.voucher)
   @ApiOperation({ summary: "Apply coupon to cart" })
   @Post("coupons/apply") 
   async apply(@CurrentUser() u: JwtPayload, @Body() b: CartCouponApplyDto) {
@@ -86,6 +89,7 @@ export class PromotionsController {
     );
     return { coupon, discount, freeDelivery, bogoRewards: bogoRewards ?? [], bogoSavings: bogoSavings ?? 0 };
   }
+  @Throttle(LIMITS.voucher)
   @ApiOperation({ summary: "Get auto best coupon for current cart" })
   @Get("coupons/auto-apply-best")
   async best(@CurrentUser() u: JwtPayload, @Query('cartTotal') cartTotal?: string) {
@@ -305,13 +309,13 @@ export class PromotionsController {
   @Get("engine/status") async engineStatus() { return { enabled: await this.promoEngine.isEnabled() }; }
 
   @RequirePermissions('marketing.edit') @ApiOperation({ summary: "Toggle the Promotion Engine on/off" })
-  @Post("engine/toggle") engineToggle(@Body() b: { enabled: boolean }) { return this.promoEngine.setEnabled(!!b.enabled); }
+  @Post("engine/toggle") engineToggle(@Body() b: EngineToggleDto) { return this.promoEngine.setEnabled(!!b.enabled); }
 
   @RequirePermissions('marketing.view') @ApiOperation({ summary: "Promotion analytics summary dashboard" })
   @Get("analytics/summary") promotionSummary() { return this.promoAnalytics.summary(); }
 
   @RequirePermissions('marketing.view') @ApiOperation({ summary: "List automatic promotions" })
-  @Get("promotions") listPromotions(@Query() q: { type?: string; status?: string }) { return this.promoEngine.list(q); }
+  @Get("promotions") listPromotions(@Query() q: PromotionListQueryDto) { return this.promoEngine.list(q); }
 
   @RequirePermissions('marketing.view') @ApiOperation({ summary: "Per-promotion performance analytics" })
   @Get("promotions/:id/analytics") promotionDetail(@Param("id") id: string) { return this.promoAnalytics.promotionAnalytics(id); }
@@ -338,7 +342,7 @@ export class PromotionsController {
 
   @Public()
   @ApiOperation({ summary: "Storefront discovery: does each product have any variant offer (read-only)" })
-  @Post("promotions/product-offers") productOffers(@Body() b: { productIds?: string[]; shopId?: string }) {
+  @Post("promotions/product-offers") productOffers(@Body() b: ProductOffersDto) {
     return this.promoEngine.productOffers(b.productIds || [], b.shopId);
   }
 

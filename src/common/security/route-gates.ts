@@ -15,14 +15,19 @@
  * `/shipments/:id/pod` and `/partners/:id/documents` ended up exposed: nobody
  * decided they should be open, the default decided for them.
  *
- * WHY AN ALLOWLIST RATHER THAN DENY-BY-DEFAULT AT REQUEST TIME
+ * HOW IT IS ENFORCED — TWICE
  *
- * Denying ungated requests would mean marking all 111 self-service routes
- * with a decorator. For those routes the denial changes nothing — they are
- * already ownership-checked and would simply be marked and allowed. All the
- * protective value is in noticing a NEW ungated route, and a boot-time check
- * does that at deploy, loudly, instead of as a 403 storm against live
- * customers. Same protection, far smaller blast radius.
+ * 1. At boot, auditRouteGates() lists every route that is neither public,
+ *    permission-gated nor on this list; production refuses to start.
+ * 2. On every request, PermissionsGuard denies a route without permission
+ *    metadata unless its handler is on this list (registerSelfServiceHandlers
+ *    turns the list into handler references at boot). This is deny by default:
+ *    a route the audit could not see, or one added in an environment that only
+ *    warns, is refused instead of open to every account.
+ *
+ * One list, not a decorator on each of the 111 handlers: it was generated
+ * from the live route table, it is reviewable in one place, and a decorator
+ * would only duplicate it.
  *
  * ADDING A ROUTE
  *
@@ -159,18 +164,24 @@ export interface UngatedRoute {
 
 const HTTP_METHODS = ["GET", "POST", "PUT", "DELETE", "PATCH", "ALL", "OPTIONS", "HEAD", "SEARCH"];
 
+interface RouteVisit extends UngatedRoute {
+  fn: Function;
+  /** Public, or carries @RequirePermissions / @RequireAnyPermission. */
+  gated: boolean;
+}
+
 /**
- * Walk every registered route and return those that are neither public, nor
- * permission-gated, nor on the self-service list above.
+ * Every registered HTTP route, with how it is gated.
  *
  * Reflection over the Nest container rather than a source-code scan, so it
- * sees what the application actually registered — decorators applied through
- * mixins, inherited controllers and all.
+ * sees what the application actually registered. Walks the whole prototype
+ * chain: a handler inherited from a base controller is a real route too, and
+ * looking only at the controller's own methods used to miss it.
  */
-export function auditRouteGates(app: { container: any }): UngatedRoute[] {
+function visitRoutes(app: { container: any }): RouteVisit[] {
   // Imported lazily so this module stays cheap to require from tests.
   const { PATH_METADATA, METHOD_METADATA } = require("@nestjs/common/constants");
-  const ungated: UngatedRoute[] = [];
+  const out: RouteVisit[] = [];
 
   for (const [, mod] of app.container.getModules()) {
     for (const [, wrapper] of mod.controllers) {
@@ -182,32 +193,70 @@ export function auditRouteGates(app: { container: any }): UngatedRoute[] {
       const clsAny = Reflect.getMetadata("any_permissions", Ctrl);
       const clsPublic = Reflect.getMetadata("isPublic", Ctrl);
 
-      for (const name of Object.getOwnPropertyNames(Ctrl.prototype)) {
-        if (name === "constructor") continue;
-        const fn = (Ctrl.prototype as Record<string, unknown>)[name];
-        const methodPath = Reflect.getMetadata(PATH_METADATA, fn as object);
-        if (methodPath === undefined) continue;
+      const seen = new Set<string>();
+      for (let proto = Ctrl.prototype; proto && proto !== Object.prototype; proto = Object.getPrototypeOf(proto)) {
+        for (const name of Object.getOwnPropertyNames(proto)) {
+          if (name === "constructor" || seen.has(name)) continue;
+          seen.add(name);
+          const fn = (Ctrl.prototype as Record<string, unknown>)[name];
+          if (typeof fn !== "function") continue;
+          const methodPath = Reflect.getMetadata(PATH_METADATA, fn as object);
+          if (methodPath === undefined) continue;
 
-        // Handler metadata wins over the controller's, matching how
-        // `reflector.getAllAndOverride([handler, class])` resolves it.
-        const perm = Reflect.getMetadata("permissions", fn as object) ?? clsPerm;
-        const any = Reflect.getMetadata("any_permissions", fn as object) ?? clsAny;
-        const isPublic = Reflect.getMetadata("isPublic", fn as object) ?? clsPublic;
-        if (isPublic || perm?.length || any?.length) continue;
+          // Handler metadata wins over the controller's, matching how
+          // `reflector.getAllAndOverride([handler, class])` resolves it.
+          const perm = Reflect.getMetadata("permissions", fn as object) ?? clsPerm;
+          const any = Reflect.getMetadata("any_permissions", fn as object) ?? clsAny;
+          const isPublic = Reflect.getMetadata("isPublic", fn as object) ?? clsPublic;
+          const gated = !!(isPublic || perm?.length || any?.length);
 
-        const idx = Reflect.getMetadata(METHOD_METADATA, fn as object);
-        const method = HTTP_METHODS[idx] ?? String(idx);
-
-        for (const base of basePaths) {
-          for (const mp of ([] as string[]).concat(methodPath)) {
-            const path = `/${base}/${mp}`.replace(/\/+/g, "/").replace(/\/$/, "") || "/";
-            if (SELF_SERVICE_ROUTES.has(`${method} ${path}`)) continue;
-            ungated.push({ method, path, controller: Ctrl.name, handler: name });
+          const idx = Reflect.getMetadata(METHOD_METADATA, fn as object);
+          const method = HTTP_METHODS[idx] ?? String(idx);
+          for (const base of basePaths) {
+            for (const mp of ([] as string[]).concat(methodPath)) {
+              const path = `/${base}/${mp}`.replace(/\/+/g, "/").replace(/\/$/, "") || "/";
+              out.push({ method, path, controller: Ctrl.name, handler: name, fn: fn as Function, gated });
+            }
           }
         }
       }
     }
   }
+  return out;
+}
 
-  return ungated;
+/**
+ * Walk every registered route and return those that are neither public, nor
+ * permission-gated, nor on the self-service list above.
+ */
+export function auditRouteGates(app: { container: any }): UngatedRoute[] {
+  return visitRoutes(app)
+    .filter((r) => !r.gated && !SELF_SERVICE_ROUTES.has(`${r.method} ${r.path}`))
+    .map(({ method, path, controller, handler }) => ({ method, path, controller, handler }));
+}
+
+/**
+ * The handlers the self-service list classifies, as function references, so
+ * PermissionsGuard can enforce the list on every request — deny by default.
+ *
+ * The boot audit alone stopped an unclassified route from shipping to
+ * production, but anywhere else (and for any route the audit could not see)
+ * the guard still let it through. Filled once at boot; until then it is
+ * empty, so an ungated route is refused rather than allowed.
+ */
+const selfServiceHandlers = new WeakSet<Function>();
+
+export function registerSelfServiceHandlers(app: { container: any }): number {
+  let n = 0;
+  for (const r of visitRoutes(app)) {
+    if (!r.gated && SELF_SERVICE_ROUTES.has(`${r.method} ${r.path}`)) {
+      selfServiceHandlers.add(r.fn);
+      n++;
+    }
+  }
+  return n;
+}
+
+export function isSelfServiceHandler(fn: Function): boolean {
+  return selfServiceHandlers.has(fn);
 }

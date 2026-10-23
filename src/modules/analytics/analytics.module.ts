@@ -1,7 +1,7 @@
 import { Controller, Get, Module, Query } from "@nestjs/common";
 import { ApiBearerAuth, ApiQuery, ApiTags } from "@nestjs/swagger";
 import { InjectModel, SequelizeModule } from "@nestjs/sequelize";
-import { Sequelize, Op } from "sequelize";
+import { Sequelize, Op, QueryTypes } from "sequelize";
 import {
   Order, OrderItem, OrderShipment, SearchQuery, Shop, User,
   Product, ProductVariant, ShopInventory, Return, NotificationAuditLog, NotificationInbox, Setting
@@ -11,6 +11,7 @@ import { RequirePermissions } from "@/common/decorators/permissions.decorator";
 import { Role } from "@/common/enums/role.enum";
 import { CurrentUser } from "@/common/decorators/current-user.decorator";
 import { JwtPayload } from "@/modules/auth/jwt.strategy";
+import { assertPlatformScope } from "@/common/utils/permission.util";
 
 /** Statuses that represent a genuinely fulfilled sale. */
 const FULFILLED_STATUSES = [OrderStatus.DELIVERED, OrderStatus.COMPLETED];
@@ -65,12 +66,20 @@ export class AnalyticsController {
     return u.role === Role.SHOP_MANAGER ? (u.shopId ?? null) : null;
   }
 
-  /** A shop's order lines that count as sales: the shipment was not cancelled, failed, refunded or left unpaid. */
-  private shopSaleLines(shopId: string) {
-    return this.item.findAll({
-      where: { shopId },
-      include: [{ model: OrderShipment, attributes: ["orderId"], required: true, where: { status: { [Op.notIn]: EXCLUDED_STATUSES } } }],
-    });
+  /**
+   * A shop's sales revenue: its order lines whose shipment was not cancelled,
+   * failed, refunded or left unpaid. Summed in SQL — this used to load every
+   * matching order line into memory and add them up in JS, per request (and
+   * once per shop on the comparison view).
+   */
+  private async shopSaleRevenue(shopId: string): Promise<number> {
+    const [row] = await this.item.sequelize!.query<{ revenue: number }>(
+      `SELECT COALESCE(SUM(oi.price * oi.quantity), 0)::float8 AS revenue
+         FROM order_items oi JOIN order_shipments s ON s.id = oi."shipmentId"
+        WHERE oi."shopId" = :shopId AND s.status NOT IN (:excluded)`,
+      { type: QueryTypes.SELECT, replacements: { shopId, excluded: EXCLUDED_STATUSES } },
+    );
+    return Number(row?.revenue ?? 0);
   }
 
   /** Platform revenue: order totals, excluding orders that never became a sale. */
@@ -82,12 +91,13 @@ export class AnalyticsController {
     const shopId = this.managerShop(u);
     if (shopId) {
       // Shop-scoped figures for a shop manager.
-      const items = await this.shopSaleLines(shopId);
-      const revenue = items.reduce((s, i) => s + Number(i.price) * i.quantity, 0);
-      const shipments = await this.ship.findAll({ where: { shopId }, attributes: ["orderId"] });
-      const orderIds = [...new Set(shipments.map((s) => s.orderId))];
-      const orders = orderIds.length ? await this.order.findAll({ where: { id: orderIds }, attributes: ["userId"] }) : [];
-      return { revenue, totalOrders: orderIds.length, customers: new Set(orders.map((o) => o.userId)).size, activeShops: 1, scope: "shop" };
+      const revenue = await this.shopSaleRevenue(shopId);
+      const [counts] = await this.item.sequelize!.query<{ orders: number; customers: number }>(
+        `SELECT COUNT(DISTINCT s."orderId")::int AS orders, COUNT(DISTINCT o."userId")::int AS customers
+           FROM order_shipments s JOIN orders o ON o.id = s."orderId" WHERE s."shopId" = :shopId`,
+        { type: QueryTypes.SELECT, replacements: { shopId } },
+      );
+      return { revenue, totalOrders: Number(counts?.orders ?? 0), customers: Number(counts?.customers ?? 0), activeShops: 1, scope: "shop" };
     }
     const [revenue, totalOrders, customers, activeShops] = await Promise.all([
       this.platformRevenue(),
@@ -101,8 +111,7 @@ export class AnalyticsController {
   @Get("revenue") async revenue(@CurrentUser() u: JwtPayload) {
     const shopId = this.managerShop(u);
     if (shopId) {
-      const items = await this.shopSaleLines(shopId);
-      return { total: items.reduce((s, i) => s + Number(i.price) * i.quantity, 0), scope: "shop" };
+      return { total: await this.shopSaleRevenue(shopId), scope: "shop" };
     }
     return { total: await this.platformRevenue(), scope: "platform" };
   }
@@ -133,37 +142,26 @@ export class AnalyticsController {
       buckets.set(d.toISOString().slice(0, 7), 0);
     }
 
-    if (shopId) {
-      // Shop scope: revenue is the shop's own order lines, not the order total,
-      // which may span several shops.
-      const rows = await this.item.findAll({
-        where: { shopId },
-        include: [{ model: OrderShipment, attributes: ["orderId"], required: true }],
-      });
-      const orderIds = [...new Set(rows.map((r: any) => r.shipment?.orderId).filter(Boolean))];
-      const orders = orderIds.length
-        ? await this.order.findAll({
-            where: { id: orderIds, status: { [Op.notIn]: EXCLUDED_STATUSES }, createdAt: { [Op.gte]: since } },
-            attributes: ["id", "createdAt"],
-          })
-        : [];
-      const monthOf = new Map(orders.map((o: any) => [o.id, o.createdAt.toISOString().slice(0, 7)]));
-      for (const r of rows as any[]) {
-        const key = monthOf.get(r.shipment?.orderId);
-        if (key && buckets.has(key)) {
-          buckets.set(key, buckets.get(key)! + Number(r.price) * r.quantity);
-        }
-      }
-    } else {
-      const orders = await this.order.findAll({
-        where: { status: { [Op.notIn]: EXCLUDED_STATUSES }, createdAt: { [Op.gte]: since } },
-        attributes: ["total", "createdAt"],
-      });
-      for (const o of orders as any[]) {
-        const key = o.createdAt.toISOString().slice(0, 7);
-        if (buckets.has(key)) buckets.set(key, buckets.get(key)! + Number(o.total));
-      }
-    }
+    // Bucketed in SQL by UTC calendar month; rows used to be loaded whole and
+    // summed in JS. Shop scope: the shop's own order lines, not the order
+    // total, which may span several shops.
+    const seq = this.item.sequelize!;
+    const rows = shopId
+      ? await seq.query<{ m: string; v: number }>(
+          `SELECT to_char(o."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM') AS m, SUM(oi.price * oi.quantity)::float8 AS v
+             FROM order_items oi
+             JOIN order_shipments s ON s.id = oi."shipmentId"
+             JOIN orders o ON o.id = s."orderId"
+            WHERE oi."shopId" = :shopId AND o.status NOT IN (:excluded) AND o."createdAt" >= :since
+            GROUP BY 1`,
+          { type: QueryTypes.SELECT, replacements: { shopId, excluded: EXCLUDED_STATUSES, since } },
+        )
+      : await seq.query<{ m: string; v: number }>(
+          `SELECT to_char("createdAt" AT TIME ZONE 'UTC', 'YYYY-MM') AS m, SUM(total)::float8 AS v
+             FROM orders WHERE status NOT IN (:excluded) AND "createdAt" >= :since GROUP BY 1`,
+          { type: QueryTypes.SELECT, replacements: { excluded: EXCLUDED_STATUSES, since } },
+        );
+    for (const r of rows) if (buckets.has(r.m)) buckets.set(r.m, buckets.get(r.m)! + Number(r.v));
 
     const series = [...buckets.entries()].map(([month, value]) => ({
       month: new Date(`${month}-01T00:00:00Z`).toLocaleString("en-US", { month: "short", timeZone: "UTC" }),
@@ -177,18 +175,19 @@ export class AnalyticsController {
   @Get("orders/by-status") async byStatus(@CurrentUser() u: JwtPayload) {
     const shopId = this.managerShop(u);
     const statuses = Object.values(OrderStatus);
-    if (shopId) {
-      return Promise.all(statuses.map(async (s) => ({ status: s, count: await this.ship.count({ where: { shopId, status: s } }) })));
-    }
-    return Promise.all(statuses.map(async (s) => ({ status: s, count: await this.order.count({ where: { status: s } }) })));
+    // One GROUP BY instead of one COUNT per status.
+    const rows = (shopId
+      ? await this.ship.findAll({ where: { shopId }, attributes: ["status", [Sequelize.fn("COUNT", Sequelize.col("id")), "n"]], group: ["status"], raw: true })
+      : await this.order.findAll({ attributes: ["status", [Sequelize.fn("COUNT", Sequelize.col("id")), "n"]], group: ["status"], raw: true })) as any[];
+    const byStatus = new Map(rows.map((r) => [r.status, Number(r.n)]));
+    return statuses.map((s) => ({ status: s, count: byStatus.get(s) ?? 0 }));
   }
 
   @Get("shops/compare") async compare(@CurrentUser() u: JwtPayload) {
     const shopId = this.managerShop(u);
     const shops = shopId ? await this.shop.findAll({ where: { id: shopId } }) : await this.shop.findAll();
     return Promise.all(shops.map(async (s) => {
-      const items = await this.shopSaleLines(s.id);
-      const revenue = items.reduce((sum, i) => sum + Number(i.price) * i.quantity, 0);
+      const revenue = await this.shopSaleRevenue(s.id);
       const shipmentsCount = await this.ship.count({ where: { shopId: s.id } });
       return {
         shopId: s.id,
@@ -199,7 +198,9 @@ export class AnalyticsController {
     }));
   }
 
-  @Get("search/top") async topSearch() {
+  @Get("search/top") async topSearch(@CurrentUser() u: JwtPayload) {
+    // Every shopper's search terms, platform-wide: not for shop accounts.
+    assertPlatformScope(u);
     const queries = await this.query.findAll({
       attributes: [
         "query",
@@ -224,6 +225,7 @@ export class AnalyticsController {
   }
 
   @Get("notifications") async notificationStats(@CurrentUser() u: JwtPayload) {
+    assertPlatformScope(u);
     // Basic stats for the dashboard
     const sent = await this.notifAudit.count({ where: { status: "sent" } });
     const delivered = await this.notifAudit.count({ where: { status: "delivered" } });
@@ -286,8 +288,12 @@ export class AnalyticsController {
   ) {
     const scopedShopId = this.managerShop(u);
     const limit = Math.min(Math.max(parseInt(limitStr) || 10, 1), 50);
-    const page  = Math.max(parseInt(pageStr) || 1, 1);
+    // Every one of these reaches the cache key, so each is pinned to a known
+    // value: free text and an unbounded page used to mint a new key per request.
+    const page  = Math.min(Math.max(parseInt(pageStr) || 1, 1), 1_000);
     const offset = (page - 1) * limit;
+    if (!["units", "revenue", "profit", "stock"].includes(metric)) metric = "units";
+    if (!["day", "week", "month", "year", "all"].includes(period)) period = "month";
 
     // ── Cache key ──────────────────────────────────────────────────────────
     const cacheKey = `bs:${scopedShopId ?? "global"}:${metric}:${period}:${limit}:${page}`;
@@ -299,25 +305,21 @@ export class AnalyticsController {
     // ── Date window ────────────────────────────────────────────────────────
     const sinceDate = this._periodToDate(period);
 
-    // ── Step 1: Find fulfilled shipment IDs within the date range ──────────
-    const shipmentWhere: any = { status: { [Op.in]: FULFILLED_STATUSES } };
-    if (scopedShopId) shipmentWhere.shopId = scopedShopId;
-    if (sinceDate) shipmentWhere.deliveredAt = { [Op.gte]: sinceDate };
-
-    const fulfilledShipments = await this.ship.findAll({
-      where: shipmentWhere,
-      attributes: ["id"],
-      raw: true,
-    }) as any[];
-
-    if (!fulfilledShipments.length) {
-      return this._buildEmptyResponse(page, limit);
-    }
-
-    const shipmentIds = fulfilledShipments.map((s: any) => s.id);
+    /*
+     * Steps 1-3 run in the database. They used to load every fulfilled
+     * shipment id, then every order-item id, then every refunded return into
+     * the API's memory and add them up in JS — on every uncached request, over
+     * the whole sales history for period=all. One subquery names the
+     * fulfilled shipments; both sums are GROUP BYs over it.
+     */
+    const seq = this.item.sequelize!;
+    const fulfilledSql =
+      `SELECT s.id FROM order_shipments s WHERE s.status IN (${FULFILLED_STATUSES.map((x) => seq.escape(x)).join(", ")})` +
+      (scopedShopId ? ` AND s."shopId" = ${seq.escape(scopedShopId)}` : "") +
+      (sinceDate ? ` AND s."deliveredAt" >= ${seq.escape(sinceDate.toISOString())}` : "");
 
     // ── Step 2: Aggregate order_items for those shipments ──────────────────
-    const itemWhere: any = { shipmentId: { [Op.in]: shipmentIds } };
+    const itemWhere: any = { shipmentId: { [Op.in]: Sequelize.literal(`(${fulfilledSql})`) } };
     if (scopedShopId) itemWhere.shopId = scopedShopId;
 
     // Raw aggregation — ONE row per product (aggregate across all its variants).
@@ -348,40 +350,20 @@ export class AnalyticsController {
       return this._buildEmptyResponse(page, limit);
     }
 
-    // ── Step 3: Subtract approved returns ─────────────────────────────────
-    // Fetch all order_item IDs for the fulfilled set to find returns.
-    const allItemsFull = await this.item.findAll({
-      where: itemWhere,
-      attributes: ["id", "productId", "quantity"],
-      raw: true,
-    }) as any[];
-    const allItemIds = allItemsFull.map((r: any) => r.id);
-
-    // Map each order-item to its product + its ordered quantity.
-    const itemToProduct = new Map<string, string>();
-    const itemQty = new Map<string, number>();
-    for (const it of allItemsFull) {
-      itemToProduct.set(it.id, it.productId);
-      itemQty.set(it.id, Number(it.quantity) || 0);
-    }
-
-    // Only REFUNDED returns are a completed sale reversal; and deduct the actual
-    // returned units (Return.quantity — supports partial returns), not the whole
-    // order-item. Falls back to the full item quantity when quantity is null.
-    const validReturns = await this.returnModel.findAll({
-      where: { orderItemId: { [Op.in]: allItemIds }, status: "refunded" },
-      attributes: ["orderItemId", "quantity"],
-      raw: true,
-    }) as any[];
-
-    // productId → total refunded return units
-    const returnedUnitsByProduct = new Map<string, number>();
-    for (const rt of validReturns) {
-      const pid = itemToProduct.get(rt.orderItemId);
-      if (!pid) continue;
-      const qty = Number(rt.quantity ?? itemQty.get(rt.orderItemId) ?? 0);
-      returnedUnitsByProduct.set(pid, (returnedUnitsByProduct.get(pid) ?? 0) + qty);
-    }
+    // ── Step 3: Subtract refunded returns (per product, in SQL) ────────────
+    // Only REFUNDED returns are a completed sale reversal, counted in the
+    // actually returned units (Return.quantity — partial returns), falling
+    // back to the whole line when quantity is null.
+    const returnedRows = await seq.query<{ productId: string; units: string }>(
+      `SELECT oi."productId", SUM(COALESCE(r.quantity, oi.quantity)) AS units
+         FROM returns r
+         JOIN order_items oi ON oi.id = r."orderItemId"
+        WHERE r.status = 'refunded' AND oi."shipmentId" IN (${fulfilledSql})` +
+        (scopedShopId ? ` AND oi."shopId" = ${seq.escape(scopedShopId)}` : "") +
+      ` GROUP BY oi."productId"`,
+      { type: QueryTypes.SELECT },
+    );
+    const returnedUnitsByProduct = new Map<string, number>(returnedRows.map((r) => [r.productId, Number(r.units) || 0]));
 
     // ── Step 4: Current stock — sum active inventory across ALL variants of ──
     // each product (previously only one arbitrary variant was counted), scoped
@@ -504,6 +486,8 @@ export class AnalyticsController {
 
     // ── Cache & return ─────────────────────────────────────────────────────
     this._bsCache.set(cacheKey, { data: result, cachedAt: Date.now() });
+    // Bounded: oldest entries go first once the map is full.
+    while (this._bsCache.size > 500) this._bsCache.delete(this._bsCache.keys().next().value as string);
     return result;
   }
 

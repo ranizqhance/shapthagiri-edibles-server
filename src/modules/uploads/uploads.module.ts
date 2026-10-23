@@ -6,6 +6,10 @@ import { Request } from "express";
 import { resolveUploadOrUrl } from "@/common/utils/upload-resolver.util";
 import { UploadInvalidTypeException } from "./uploads.errors";
 import { Throttle } from "@nestjs/throttler";
+import { CurrentUser } from "@/common/decorators/current-user.decorator";
+import { JwtPayload } from "@/modules/auth/jwt.strategy";
+import { Role } from "@/common/enums/role.enum";
+import { ForbiddenException } from "@/common/errors/http";
 
 /**
  * The whole string must be one of these types.
@@ -35,9 +39,25 @@ const ALLOWED = /^(?:image\/(?:png|jpe?g|webp)|video\/(?:mp4|webm)|application\/
 // before they were listed here both fell back to the private `general/`.
 const UPLOAD_FOLDERS = new Set(["products", "categories", "avatars", "documents", "disputes", "returns", "reviews", "general"]);
 
-function resolveFolder(requested?: string): string {
+/**
+ * Folders an account WITHOUT staff permissions may write to — the features a
+ * customer or rider actually uploads through. Every authenticated account used
+ * to be able to write into any folder, including `documents/` (partner KYC)
+ * and the product image prefix the storefront serves publicly.
+ */
+const SELF_SERVICE_FOLDERS: Record<string, Set<string>> = {
+  [Role.CUSTOMER]: new Set(["avatars", "reviews", "returns", "disputes"]),
+  [Role.DELIVERY_PARTNER]: new Set(["avatars", "documents"]),
+};
+
+function resolveFolder(user: JwtPayload, requested?: string): string {
   const folder = (requested ?? "").trim().toLowerCase();
-  return UPLOAD_FOLDERS.has(folder) ? folder : "general";
+  const resolved = UPLOAD_FOLDERS.has(folder) ? folder : "general";
+  // Staff hold RBAC permissions; customers and riders hold none.
+  if ((user.permissions ?? []).length > 0) return resolved;
+  const allowed = SELF_SERVICE_FOLDERS[user.role] ?? new Set<string>();
+  if (!allowed.has(resolved)) throw new ForbiddenException("AUTH_FORBIDDEN", `Uploads to "${resolved}" are not available to this account.`);
+  return resolved;
 }
 
 @ApiTags("Uploads")
@@ -66,8 +86,8 @@ export class UploadsController {
       cb(null, true);
     },
   }))
-  async upload(@Req() req: Request, @UploadedFile() _file: Express.Multer.File, @Query("folder") folder?: string) {
-    const url = await resolveUploadOrUrl(req, "url", resolveFolder(folder));
+  async upload(@CurrentUser() u: JwtPayload, @Req() req: Request, @UploadedFile() _file: Express.Multer.File, @Query("folder") folder?: string) {
+    const url = await resolveUploadOrUrl(req, "url", resolveFolder(u, folder));
     return { url };
   }
 }

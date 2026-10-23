@@ -4,6 +4,7 @@ import { PERMISSIONS_KEY, ANY_PERMISSIONS_KEY } from "@/common/decorators/permis
 import { IS_PUBLIC_KEY } from "@/common/decorators/public.decorator";
 import { WILDCARD_PERMISSION } from "@/modules/rbac/rbac.catalog";
 import { ForbiddenException } from "@/common/errors/http";
+import { isSelfServiceHandler } from "@/common/security/route-gates";
 
 /**
  * Enforces @RequirePermissions / @RequireAnyPermission. Runs globally after
@@ -26,7 +27,14 @@ export class PermissionsGuard implements CanActivate {
 
     const all = this.reflector.getAllAndOverride<string[]>(PERMISSIONS_KEY, [ctx.getHandler(), ctx.getClass()]);
     const any = this.reflector.getAllAndOverride<string[]>(ANY_PERMISSIONS_KEY, [ctx.getHandler(), ctx.getClass()]);
-    if (!all?.length && !any?.length) return true; // no permission metadata → not gated by RBAC
+    if (!all?.length && !any?.length) {
+      // No permission metadata: allowed only if someone classified the route as
+      // self-service (SELF_SERVICE_ROUTES, route-gates.ts) — its handler scopes
+      // by the caller. Anything else is denied. This used to return true, so a
+      // route that simply forgot @RequirePermissions was open to every account.
+      if (isSelfServiceHandler(ctx.getHandler())) return true;
+      throw new ForbiddenException("AUTH_FORBIDDEN");
+    }
 
     const { user } = ctx.switchToHttp().getRequest();
     const held: string[] = user?.permissions ?? [];

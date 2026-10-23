@@ -41,6 +41,9 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
    * the PermissionsGuard is a pure in-memory check and edits apply on the next call.
    */
   async validate(payload: JwtPayload): Promise<JwtPayload> {
+    // Only access tokens here. Older tokens carry no type and are accepted
+    // until they expire (15 minutes).
+    if ((payload as any).type && (payload as any).type !== "access") throw new UnauthorizedException("AUTH_TOKEN_INVALID");
     const user = await this.userModel.findByPk(payload.sub);
     if (!user || !user.isActive) throw new UnauthorizedException("AUTH_TOKEN_INVALID");
     if ((payload.tv ?? 0) !== user.tokenVersion) throw new UnauthorizedException("AUTH_TOKEN_INVALID", "Session has been revoked");

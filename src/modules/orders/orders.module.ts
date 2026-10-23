@@ -1,6 +1,7 @@
 import { Op, QueryTypes } from "sequelize";
 import { Body, Controller, Get, Headers, HttpCode, Module, Param, Post, Query, forwardRef, Inject } from "@nestjs/common";
 import { Throttle } from "@nestjs/throttler";
+import { LIMITS } from "@/common/security/throttle";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { InjectModel, SequelizeModule } from "@nestjs/sequelize";
 import { Cart, CartItem, IdempotencyKey, Invoice, Order, OrderItem, OrderShipment, OrderStatusHistory, Product, ProductMedia, ProductVariant, RoutingDecision, Setting, ShopInventory, StockMovement, User, Shop, AuditLog, CouponRedemption, DeliveryAssignment, DeliveryPartner, Payment, PaymentRefund, EarningWallet, GiftCard, Return, PromotionRedemption } from "@/models";
@@ -9,6 +10,7 @@ import { PricingService } from "./pricing.service";
 import { CurrentUser } from "@/common/decorators/current-user.decorator";
 import { JwtPayload } from "@/modules/auth/jwt.strategy";
 import { RequirePermissions } from "@/common/decorators/permissions.decorator";
+import { shopScope, assertPlatformScope } from "@/common/utils/permission.util";
 import { Role } from "@/common/enums/role.enum";
 import { PageOptionsDto } from "@/common/dto/page-options.dto";
 import { paginate, findOr404 } from "@/common/utils/crud.util";
@@ -20,7 +22,7 @@ import { WalletModule } from "@/modules/wallet/wallet.module";
 import { NotificationsModule } from "@/modules/notifications/notifications.module";
 import { PaymentsModule } from "@/modules/payments/payments.module";
 import { NotificationsService } from "@/modules/notifications/notifications.service";
-import { PlaceOrderDto, ReassignDto, OrderLookupDto } from "@/common/dto/common.dto";
+import { PlaceOrderDto, ReassignDto, OrderLookupDto, OrderPreviewDto, ReasonDto, RoutingDecisionsQueryDto } from "@/common/dto/common.dto";
 import { Public } from "@/common/decorators/public.decorator";
 import { NotificationEventType } from "@/common/enums/notification-event.enum";
 import { pickPartner, candidateWhere } from "@/common/utils/partner-dispatch.util";
@@ -29,6 +31,7 @@ import { pickPartner, candidateWhere } from "@/common/utils/partner-dispatch.uti
 
 import { PaymentsService } from "@/modules/payments/payments.service";
 import { PolicyResolutionService } from "@/modules/returns/policy-resolution.service";
+import { PAYMENT_CUSTOMER_ATTRS, GIFT_CARD_HOLDER_ATTRS } from "@/common/security/public-attributes";
 
 /**
  * Columns the order views actually read.
@@ -140,7 +143,7 @@ export class OrdersController {
    */
   @Public()
   @Post("preview")
-  preview(@Body() body: { subtotal: number, discount?: number, express?: boolean, freeDelivery?: boolean, giftCardBalance?: number, loyaltyDiscount?: number, parcelG?: number, state?: string }) {
+  preview(@Body() body: OrderPreviewDto) {
     return this.pricing.compute(
       body.subtotal,
       body.discount || 0,
@@ -225,7 +228,12 @@ export class OrdersController {
   }
 
   @Get("me/:id") async myDetail(@CurrentUser() u: JwtPayload, @Param("id") id: string) {
-    const order = await this.order.findOne({ where: { id, userId: u.sub }, include: [GiftCard, Payment] });
+    // The customer's own payment and gift card, minus internals (idempotency
+    // keys, gateway order ids, staff notes) the full rows used to carry.
+    const order = await this.order.findOne({
+      where: { id, userId: u.sub },
+      include: [{ model: GiftCard, attributes: GIFT_CARD_HOLDER_ATTRS }, { model: Payment, attributes: PAYMENT_CUSTOMER_ATTRS }],
+    });
     if (!order) throw new NotFoundException("NOT_FOUND", "Order not found");
     
     // JIT Payment Reconciliation
@@ -242,11 +250,12 @@ export class OrdersController {
       }]
     });
     
-    // Fetch any return requests for items in this order
-    const returns = await this.returnReq.findAll({
-      where: { userId: u.sub },
-      raw: true
-    });
+    // Return requests for THIS order's items. It loaded every return the
+    // customer had ever made, on every order page view.
+    const orderItemIds = shipments.flatMap((s: any) => (s.items ?? []).map((i: any) => i.id));
+    const returns = orderItemIds.length
+      ? await this.returnReq.findAll({ where: { userId: u.sub, orderItemId: orderItemIds }, raw: true })
+      : [];
     
     // Bulk resolve policies to avoid N+1 queries
     const itemsToResolve: { productId: string; categoryId?: string }[] = [];
@@ -329,31 +338,32 @@ export class OrdersController {
     };
   }
 
-  @Post("me/:id/cancel") cancel(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() body?: { reason?: string }) {
+  @Post("me/:id/cancel") cancel(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() body?: ReasonDto) {
     return this.orders.cancel(u.sub, id, body?.reason);
   }
 
   @RequirePermissions('orders.cancel')
-  @Post("admin/:id/cancel") adminCancel(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() body?: { reason?: string }) {
-    return this.orders.adminCancel(id, body?.reason, u.sub);
+  @Post("admin/:id/cancel") adminCancel(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() body?: ReasonDto) {
+    return this.orders.adminCancel(id, body?.reason, u.sub, shopScope(u));
   }
 
   @RequirePermissions('orders.cancel')
-  @Post("manager/shipments/:id/cancel") managerCancel(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() body?: { reason?: string }) {
+  @Post("manager/shipments/:id/cancel") managerCancel(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() body?: ReasonDto) {
     return this.orders.managerCancel(u, id, body?.reason);
   }
 
   @RequirePermissions('orders.cancel')
-  @Post("manager/shipments/:id/approve-cancel") managerApprove(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() body?: { reason?: string }) {
+  @Post("manager/shipments/:id/approve-cancel") managerApprove(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() body?: ReasonDto) {
     return this.orders.approveCancellationRequest(u, id, body?.reason);
   }
 
   @RequirePermissions('orders.cancel')
-  @Post("manager/shipments/:id/reject-cancel") managerReject(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() body?: { reason?: string }) {
+  @Post("manager/shipments/:id/reject-cancel") managerReject(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() body?: ReasonDto) {
     return this.orders.rejectCancellationRequest(u, id, body?.reason);
   }
 
   @Post("me/:id/reorder") reorder(@CurrentUser() u: JwtPayload, @Param("id") id: string) { return this.orders.reorder(u.sub, id); }
+  @Throttle(LIMITS.export)
   @Get("me/:id/invoice.pdf") invoice(@CurrentUser() u: JwtPayload, @Param("id") id: string) { return this.orders.invoice(u.sub, id); }
 
   @RequirePermissions('orders.view')
@@ -766,7 +776,9 @@ await this.orders.validatePaymentForFulfillment(shipment.orderId, u);
 
   @RequirePermissions('orders.view')
   @Get("admin/routing/kpis")
-  async routingKpis() {
+  async routingKpis(@CurrentUser() u: JwtPayload) {
+    // Platform-wide counts (every shop's routing decisions): not for shop accounts.
+    assertPlatformScope(u);
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
     const seq = this.routing.sequelize!;
@@ -803,7 +815,7 @@ await this.orders.validatePaymentForFulfillment(shipment.orderId, u);
    */
   @RequirePermissions('orders.view')
   @Get("admin/routing/decisions")
-  async routingDecisions(@CurrentUser() u: JwtPayload, @Query() q: any) {
+  async routingDecisions(@CurrentUser() u: JwtPayload, @Query() q: RoutingDecisionsQueryDto) {
     const seq = this.routing.sequelize!;
     const page = Math.max(1, Number(q.page) || 1);
     const limit = Math.min(100, Math.max(1, Number(q.limit) || 20));
@@ -959,7 +971,7 @@ await this.orders.validatePaymentForFulfillment(shipment.orderId, u);
 
   @RequirePermissions('fulfillment.assign')
   @Post("admin/shipments/:id/reassign") async reassign(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() body: ReassignDto) {
-    return this.orders.reassignShipment(id, body.newShopId, u.sub, body.reason);
+    return this.orders.reassignShipment(id, body.newShopId, u.sub, body.reason, shopScope(u));
   }
 }
 

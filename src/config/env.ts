@@ -17,7 +17,8 @@ export const env = cleanEnv(process.env, {
   JWT_ACCESS_SECRET: str({ default: "dev-access-secret-change-me" }),
   JWT_REFRESH_SECRET: str({ default: "dev-refresh-secret-change-me" }),
   JWT_ACCESS_EXPIRES: str({ default: "15m" }),
-  JWT_REFRESH_EXPIRES: str({ default: "30d" }),
+  // 14 days, matching the session row's lifetime (auth.service REFRESH_TTL_MS).
+  JWT_REFRESH_EXPIRES: str({ default: "14d" }),
 
   CORS_ORIGINS: str({ default: "http://localhost:9164" }),
 
@@ -154,7 +155,15 @@ if (isProd) {
       `Refusing to start in production without: ${missing.map(([k, why]) => `${k} (${why})`).join("; ")}.`,
     );
   }
-  if (env.DOCS_USER === "admin" && env.DOCS_PASSWORD === "admin") {
-    throw new Error("DOCS_USER/DOCS_PASSWORD are still admin/admin in production.");
+  // The docs password guards the full API description and the queue dashboard
+  // (every queued job's payload). "Set" is not enough — it defaults to "admin".
+  if (env.DOCS_PASSWORD === "admin" || env.DOCS_PASSWORD.length < 16 || env.DOCS_PASSWORD === env.DOCS_USER) {
+    throw new Error("DOCS_PASSWORD must be at least 16 characters and not the default in production (it guards the API docs and the queue dashboard).");
+  }
+  // Online payment through the mock gateway would accept every signature and
+  // report every order captured. Production either takes no online payment
+  // or uses a real gateway.
+  if (env.ONLINE_PAYMENTS_ENABLED && env.PAYMENT_GATEWAY === "mock") {
+    throw new Error("ONLINE_PAYMENTS_ENABLED is on with PAYMENT_GATEWAY=mock in production — set a real gateway or turn online payment off.");
   }
 }

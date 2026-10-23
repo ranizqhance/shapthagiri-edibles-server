@@ -1,5 +1,8 @@
 import { Logger } from "@nestjs/common";
 import { withRenderSlot } from "./render-gate.util";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
+import { mediaHost } from "@/common/providers/storage.provider";
 
 const logger = new Logger("Pdf");
 
@@ -48,23 +51,49 @@ function launchArgs(): string[] {
  * `about:blank` has to be allowed: `setContent` navigates there first, and
  * aborting that navigation leaves the call hanging until its timeout.
  *
- * HTTPS on its own is not enough, which is why the host is checked too:
- * `https://localhost` and `https://169.254.169.254` are both HTTPS. The
- * invoice renderer blocked `https://localhost` before these three launch
- * sites were merged; this keeps that and names the rest of the range.
+ * HTTPS on its own is not enough: `https://localhost`, `https://169.254.169.254`
+ * and a public name that resolves to 10.0.0.5 are all HTTPS. A hostname
+ * regex used to stand guard here, and it missed CGNAT (100.64/10), IPv6
+ * private and link-local ranges, and every hostname that resolves inward.
+ *
+ * So the rule is an allowlist: the only host a document may fetch from is our
+ * own media bucket — product images are the only remote thing these
+ * documents contain. Where no bucket is configured (local development) a
+ * public-looking https URL is allowed only if every address its name
+ * resolves to is public.
  */
-const BLOCKED_RENDER_HOSTS =
-  /^(localhost|0\.0\.0\.0|\[?::1\]?|127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)/i;
-
-export function isAllowedResource(url: string): boolean {
+export async function isAllowedResource(url: string): Promise<boolean> {
   if (url === "about:blank" || url.startsWith("data:")) return true;
-  if (!url.startsWith("https://")) return false;
+  let parsed: URL;
   try {
-    return !BLOCKED_RENDER_HOSTS.test(new URL(url).hostname);
+    parsed = new URL(url);
   } catch {
-    // An unparseable URL is not something a document needs.
+    return false; // an unparseable URL is not something a document needs
+  }
+  if (parsed.protocol !== "https:") return false;
+  const host = mediaHost();
+  if (host) return parsed.host === host;
+
+  // The URL parser has already normalised numeric forms ("2130706433" -> 127.0.0.1).
+  const name = parsed.hostname.replace(/^\[|\]$/g, "");
+  try {
+    const addrs = isIP(name) ? [name] : (await lookup(name, { all: true })).map((a) => a.address);
+    return addrs.length > 0 && addrs.every((a) => !isPrivateAddress(a));
+  } catch {
     return false;
   }
+}
+
+/** Loopback, private, CGNAT, link-local, unique-local, multicast, unspecified — IPv4 and IPv6. */
+export function isPrivateAddress(addr: string): boolean {
+  const v4 = addr.toLowerCase().startsWith("::ffff:") ? addr.slice(7) : addr;
+  if (isIP(v4) === 4) {
+    const [a, b] = v4.split(".").map(Number);
+    return a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127) ||
+      (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || a >= 224;
+  }
+  const v6 = addr.toLowerCase();
+  return v6 === "::" || v6 === "::1" || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6) || v6.startsWith("ff");
 }
 
 export interface PdfOptions {
@@ -88,14 +117,20 @@ export async function htmlToPdf(html: string, label = "pdf", opts: PdfOptions = 
     const puppeteerMod: any = await import("puppeteer");
     const puppeteer = puppeteerMod.default ?? puppeteerMod;
 
-    const browser = await puppeteer.launch({ headless: true, args: launchArgs() });
+    // Launch and every DevTools call are bounded too, not just the render:
+    // a wedged browser start used to hold a render slot indefinitely.
+    const browser = await puppeteer.launch({ headless: true, args: launchArgs(), timeout: 30_000, protocolTimeout: 60_000 });
     try {
       const page = await browser.newPage();
+      // Documents are static HTML; nothing in them needs to run.
+      await page.setJavaScriptEnabled(false);
 
       await page.setRequestInterception(true);
-      page.on("request", (req: any) =>
-        isAllowedResource(req.url()) ? req.continue() : req.abort(),
-      );
+      page.on("request", (req: any) => {
+        isAllowedResource(req.url())
+          .then((ok) => (ok ? req.continue() : req.abort()))
+          .catch(() => req.abort());
+      });
 
       /*
        * Bounded, but with real headroom.

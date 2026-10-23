@@ -14,12 +14,42 @@ import { logger } from "@/common/utils/logger";
  * If S3 is not configured we fail loudly at upload time rather than writing
  * somewhere that looks fine in development and loses data in production.
  */
+/** MP4 brands we accept (major brand at bytes 8-12 of the ftyp box). */
+const MP4_BRANDS = new Set(["isom", "iso2", "iso4", "iso5", "iso6", "mp41", "mp42", "avc1", "M4V ", "dash", "MSNV"]);
+
+/** Upload prefixes whose objects the API may delete. Not `invoices/`. */
+const DELETABLE_PREFIXES = ["products", "categories", "avatars", "documents", "disputes", "returns", "reviews", "general"];
+
+/** Our bucket's public host, e.g. "my-bucket.s3.us-east-1.amazonaws.com"; null when S3 is not configured. */
+export function mediaHost(): string | null {
+  return env.AWS_S3_BUCKET && env.AWS_REGION ? `${env.AWS_S3_BUCKET}.s3.${env.AWS_REGION}.amazonaws.com` : null;
+}
+
+/**
+ * Is this a URL of a file we store? https on our bucket's host only. With S3
+ * unconfigured (local development) any https URL passes — nothing is stored
+ * then anyway.
+ */
+export function isOwnMediaUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "https:") return false;
+    const host = mediaHost();
+    return host ? u.host === host : true;
+  } catch {
+    return false;
+  }
+}
+
 export class StorageProvider {
   private s3Client?: S3Client;
 
   constructor() {
     if (env.AWS_ACCESS_KEY_ID && env.AWS_SECRET_ACCESS_KEY && env.AWS_REGION && env.AWS_S3_BUCKET) {
       this.s3Client = new S3Client({
+        // Nothing bounded these calls: a stalled connection held the upload
+        // request (and its 10 MB buffer) open indefinitely.
+        requestHandler: { connectionTimeout: 5_000, requestTimeout: 60_000 },
         region: env.AWS_REGION,
         credentials: {
           accessKeyId: env.AWS_ACCESS_KEY_ID,
@@ -57,9 +87,16 @@ export class StorageProvider {
     if (startsWith(0x25, 0x50, 0x44, 0x46)) return "application/pdf";           // %PDF
     if (buffer.subarray(0, 4).toString("latin1") === "RIFF" &&
         buffer.subarray(8, 12).toString("latin1") === "WEBP") return "image/webp";
-    // ISO-BMFF: "....ftyp" — mp4 and friends.
-    if (buffer.subarray(4, 8).toString("latin1") === "ftyp") return "video/mp4";
-    if (startsWith(0x1a, 0x45, 0xdf, 0xa3)) return "video/webm";
+    // ISO-BMFF ("....ftyp<brand>") is a family, not a format: AVIF, HEIC and
+    // other containers share it. Only real MP4 brands are video/mp4 — an AVIF
+    // used to be stored as video/mp4 because the box name alone matched.
+    if (buffer.subarray(4, 8).toString("latin1") === "ftyp") {
+      return MP4_BRANDS.has(buffer.subarray(8, 12).toString("latin1")) ? "video/mp4" : null;
+    }
+    // EBML is Matroska's header too; WebM declares its DocType early on.
+    if (startsWith(0x1a, 0x45, 0xdf, 0xa3)) {
+      return buffer.subarray(0, 64).includes("webm") ? "video/webm" : null;
+    }
 
     return null;
   }
@@ -129,11 +166,14 @@ export class StorageProvider {
   async deleteFile(url: string): Promise<void> {
     try {
       if (!url || !this.s3Client) return;
-      // Only our own bucket objects are deletable — `url` may legitimately be an
-      // externally hosted image supplied via the `url` field instead of a file.
-      if (!url.includes(".s3.") || !url.includes("amazonaws.com")) return;
-
-      const key = decodeURIComponent(new URL(url).pathname.substring(1));
+      // Only objects of OUR bucket, under an upload prefix. Any S3-looking URL
+      // used to pass (".s3." + "amazonaws.com"), and the key was taken from its
+      // path and deleted from our bucket — so a client-supplied media URL
+      // could delete any object, archived invoices included.
+      const parsed = new URL(url);
+      if (parsed.protocol !== "https:" || parsed.host !== mediaHost()) return;
+      const key = decodeURIComponent(parsed.pathname.substring(1));
+      if (!DELETABLE_PREFIXES.some((p) => key.startsWith(`${p}/`))) return;
       await this.s3Client.send(
         new DeleteObjectCommand({ Bucket: env.AWS_S3_BUCKET, Key: key })
       );

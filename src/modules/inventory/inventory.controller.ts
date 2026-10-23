@@ -1,3 +1,6 @@
+import { defuseFormula } from "@/common/utils/csv.util";
+import { Throttle } from "@nestjs/throttler";
+import { LIMITS } from "@/common/security/throttle";
 import { Body, Controller, Get, Param, Patch, Post, Query } from "@nestjs/common";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { InjectModel } from "@nestjs/sequelize";
@@ -425,6 +428,7 @@ export class InventoryController {
     return { items: result.items.map((row) => this.flattenMovementRow(row as StockMovement)), meta: result.meta };
   }
 
+  @Throttle(LIMITS.export)
   @RequirePermissions('inventory.export')
   @Get("movements/export")
   async exportMovements(
@@ -508,10 +512,7 @@ export class InventoryController {
       const row = this.flattenMovementRow(mov);
       // A leading = + - or @ is executed as a formula by Excel and Sheets.
       // `reason` and the reference fields are operator-supplied text.
-      const guard = (v: unknown) => {
-        const text = String(v ?? "");
-        return /^[=+\-@]/.test(text) ? "'" + text : text;
-      };
+      const guard = (v: unknown) => defuseFormula(String(v ?? ""));
       const sku = guard(row.sku).replace(/"/g, '""');
       const title = guard(row.title).replace(/"/g, '""');
       const shopName = guard(row.shopName).replace(/"/g, '""');

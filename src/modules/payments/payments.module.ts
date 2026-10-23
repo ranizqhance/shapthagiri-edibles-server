@@ -1,3 +1,5 @@
+import { Throttle } from "@nestjs/throttler";
+import { LIMITS } from "@/common/security/throttle";
 import { Body, Controller, Get, Headers, Param, Post, UseGuards, Module, forwardRef, Res } from "@nestjs/common";
 import type { Response } from "express";
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
@@ -40,9 +42,10 @@ export class PaymentsController {
   @ApiBearerAuth()
   @Post("verify")
   async verify(
+    @CurrentUser() u: JwtPayload,
     @Body() b: PaymentVerifyDto
   ) {
-    return this.paymentsService.verifyPayment(b);
+    return this.paymentsService.verifyPayment(b, u);
   }
 
   @ApiBearerAuth()
@@ -101,6 +104,7 @@ export class PaymentsController {
    * and phone. The browser was fetching that link directly and getting a 403,
    * which surfaced as "Something went wrong".
    */
+  @Throttle(LIMITS.export)
   @ApiBearerAuth()
   @Get("invoices/:orderId/pdf")
   async invPdf(

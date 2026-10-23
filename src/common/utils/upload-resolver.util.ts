@@ -1,5 +1,5 @@
 import { Request } from "express";
-import { storageProvider } from "@/common/providers/storage.provider";
+import { storageProvider, isOwnMediaUrl } from "@/common/providers/storage.provider";
 import { BadRequestException } from "@/common/errors/http";
 
 /**
@@ -35,5 +35,14 @@ export async function resolveUploadOrUrl(req: Request, fieldName = "url", folder
   }
 
   if (hasFile) return storageProvider.saveBuffer(file!.buffer, file!.originalname, folder);
-  return url!.trim();
+  // The URL alternative must point at a file we store. Any string used to be
+  // accepted and saved onto the record — `javascript:` links, plain http,
+  // internal addresses later fetched by the PDF renderer.
+  const given = url!.trim();
+  if (!isOwnMediaUrl(given)) {
+    throw new BadRequestException("BAD_REQUEST", "Use an uploaded file, or an https URL of one already in our media storage.", [
+      { field: fieldName, code: "INVALID_URL", message: "Not a URL of our media storage" },
+    ]);
+  }
+  return given;
 }

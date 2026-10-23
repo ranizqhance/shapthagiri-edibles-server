@@ -182,7 +182,10 @@ export class OrdersService {
           let unitPrice = Number(v?.defaultPrice || 0);
           if (assignment) {
             const inv = inventories.find(i => i.shopId === assignment.shopId && i.variantId === item.variantId);
-            if (inv && inv.priceOverride) {
+            // `!= null`, the same test the order lines use when they are written
+            // below (`priceOverride ?? defaultPrice`). A truthiness test here let
+            // an override of 0 price the total and the lines differently.
+            if (inv && inv.priceOverride != null) {
               unitPrice = Number(inv.priceOverride);
             }
           }
@@ -866,7 +869,7 @@ export class OrdersService {
     });
   }
 
-  async adminCancel(orderId: string, reason?: string, adminId?: string) {
+  async adminCancel(orderId: string, reason?: string, adminId?: string, scopeShopId?: string | null) {
     return this.sequelize.transaction(async (t) => {
       const order = await this.order.findOne({
         where: { id: orderId },
@@ -884,6 +887,13 @@ export class OrdersService {
         lock: t.LOCK.UPDATE,
         transaction: t
       });
+      // A shop account may cancel only an order its own shop fulfils entirely;
+      // cancelling cancels every shipment, other shops' included. Same answer
+      // as a missing order, so order ids cannot be probed across shops.
+      if (scopeShopId && shipments.some((s) => s.shopId !== scopeShopId)) {
+        throw new NotFoundException("NOT_FOUND", "Order not found");
+      }
+
       // Delivered goods are a return, not a cancellation: cancelling refunded the
       // full amount and restocked units the customer still has.
       if (shipments.some((s) => DELIVERED_STATES.includes(s.status))) {
@@ -1080,6 +1090,7 @@ export class OrdersService {
 
     let paymentRefundId: string | null = null;
     let paymentToRefund: Payment | null = null;
+    let cancelRefundAmount = 0;
 
     const oldOrderStatus = order.status;
     await OrderShipment.deriveAndUpdateOrderStatus(order.id, t);
@@ -1116,10 +1127,19 @@ export class OrdersService {
         if (paymentToRefund) {
           // The gateway refund is the cash leg only. Gift card and wallet are
           // returned by restoreStoredValue above; refunding order.total as well
-          // paid them back twice.
+          // paid them back twice. And never more than is still unrefunded on
+          // the payment: refunds already issued (or in flight) for a return or
+          // a dispute used to be ignored here, so cancelling refunded them twice.
+          const prior = (await this.paymentRefundModel.findAll({
+            where: { paymentId: paymentToRefund.id, status: ["pending", "processing", "succeeded"] as any },
+            attributes: ["amount"], transaction: t,
+          })).reduce((sum, r) => sum + Number(r.amount), 0);
+          cancelRefundAmount = Math.max(0, Math.min(Number(order.payableAmount ?? order.total), Number(paymentToRefund.amount) - prior));
+        }
+        if (paymentToRefund && cancelRefundAmount > 0) {
           const refundObj = await this.paymentRefundModel.create({
             paymentId: paymentToRefund.id,
-            amount: Number(order.payableAmount ?? order.total),
+            amount: cancelRefundAmount,
             reason: reason || "Order cancelled",
             status: "pending"
           } as any, { transaction: t });
@@ -1144,7 +1164,7 @@ export class OrdersService {
       void (async () => {
       if (paymentRefundId && paymentToRefund) {
         try {
-          const res = await paymentProvider.refund(paymentToRefund.gatewayRef ?? paymentToRefund.id, Number(order.payableAmount ?? order.total));
+          const res = await paymentProvider.refund(paymentToRefund.gatewayRef ?? paymentToRefund.id, cancelRefundAmount);
           await this.paymentRefundModel.update(
             { refundRef: res.refundRef },
             { where: { id: paymentRefundId } }
@@ -1190,6 +1210,12 @@ export class OrdersService {
   }
 
   async reorder(userId: string, orderId: string) {
+    // Only the caller's own order. Without this any order id copied its lines
+    // into the caller's cart, which told them what someone else had bought.
+    // "Not yours" answers exactly like "no such order", so ids can't be probed.
+    const owned = await this.order.findOne({ where: { id: orderId, userId }, attributes: ["id"] });
+    if (!owned) throw new NotFoundException("NOT_FOUND", "Order not found");
+
     const ships = await this.shipment.findAll({ where: { orderId } });
     const items = await this.orderItem.findAll({ where: { shipmentId: ships.map((s) => s.id) } });
     const [cart] = await this.cart.findOrCreate({ where: { userId, status: "active" }, defaults: { userId, status: "active" } as any });
@@ -1379,8 +1405,13 @@ export class OrdersService {
        * differently. Customers download invoices through the authenticated
        * endpoint, which renders them; this copy is the archive.
        */
-      const url = await storageProvider.saveBuffer(pdf, `${inv.number}.pdf`, "invoices");
-      await inv.update({ url });
+      // Once per invoice. Every render used to write a fresh object, leaving
+      // an unbounded pile of copies of a document carrying the customer's
+      // name and address.
+      if (!inv.url) {
+        const url = await storageProvider.saveBuffer(pdf, `${inv.number}.pdf`, "invoices");
+        await inv.update({ url });
+      }
     } catch (e) {
       this.logger.warn(
         `Invoice ${inv.number} could not be archived to storage: ${(e as Error).message}`,
@@ -1393,7 +1424,10 @@ export class OrdersService {
   /** The invoice record. Renders nothing — see `invoicePdf` for the bytes. */
   async invoice(userId: string, orderId: string) {
     const { inv } = await this.invoiceRecord(userId, orderId);
-    return inv;
+    // Without the archive's storage URL: the PDF is served over the
+    // authenticated endpoint, and the archive copy is not a download link.
+    const { url, ...record } = inv.toJSON() as any;
+    return record;
   }
 
   /** The invoice as bytes, for streaming over the authenticated API. */
@@ -1688,11 +1722,14 @@ export class OrdersService {
     });
   }
 
-    async reassignShipment(shipmentId: string, newShopId: string, actorId: string, reason?: string) {
+    async reassignShipment(shipmentId: string, newShopId: string, actorId: string, reason?: string, scopeShopId?: string | null) {
       return this.sequelize.transaction(async (t) => {
         // 1. Fetch shipment
         const shipment = await this.shipment.findByPk(shipmentId, { lock: t.LOCK.UPDATE, transaction: t });
-        if (!shipment) throw new NotFoundException("NOT_FOUND", "Shipment not found");
+        // A shop account may hand on only its own shop's shipments.
+        if (!shipment || (scopeShopId && shipment.shopId !== scopeShopId)) {
+          throw new NotFoundException("NOT_FOUND", "Shipment not found");
+        }
         const oldShopId = shipment.shopId;
 
         // 2. Validate shipment status

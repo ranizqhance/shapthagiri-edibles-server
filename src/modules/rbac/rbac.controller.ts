@@ -25,6 +25,7 @@ export class RbacController {
       ip: req.ip ?? (Array.isArray(fwd) ? fwd[0] : fwd) ?? null,
       userAgent: (req.headers["user-agent"] as string) ?? null,
       correlationId: (req as any).correlationId ?? (req.headers["x-correlation-id"] as string) ?? null,
+      actorPermissions: user.permissions ?? [],
     };
   }
 

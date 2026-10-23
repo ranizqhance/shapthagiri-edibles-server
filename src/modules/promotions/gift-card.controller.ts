@@ -1,3 +1,6 @@
+import { csvCell } from "@/common/utils/csv.util";
+import { Throttle } from "@nestjs/throttler";
+import { LIMITS } from "@/common/security/throttle";
 import { Controller, Get, Post, Patch, Body, Param, Query, UseGuards, BadRequestException } from "@nestjs/common";
 import { ApiTags, ApiBearerAuth } from "@nestjs/swagger";
 import { GiftCardService } from "./gift-card.service";
@@ -51,6 +54,7 @@ export class GiftCardController {
 
   // --- Customer APIs ---
 
+  @Throttle(LIMITS.voucher)
   @Post("promotions/gift-cards/validate")
   async validateGiftCard(@CurrentUser() u: JwtPayload, @Body() data: ApplyGiftCardDto) {
     if (!data.code) throw new BadRequestException("Code is required");
@@ -82,6 +86,7 @@ export class GiftCardController {
     });
   }
 
+  @Throttle(LIMITS.voucher)
   @Post("promotions/gift-cards/claim")
   async claimGiftCard(
     @CurrentUser() u: JwtPayload,
@@ -109,6 +114,7 @@ export class GiftCardController {
     return this.giftCardService.bulkRecharge(data.payloads, u.sub, data.notes);
   }
 
+  @Throttle(LIMITS.export)
   @Get(["admin/gift-cards/export/csv", "promotions/gift-cards/export/csv"])
   @RequirePermissions('giftcards.view')
   async exportCsv(@Query("limit") limit: string) {
@@ -123,11 +129,7 @@ export class GiftCardController {
      * which is where an export like this always ends up. Gift-card codes
      * and customer emails are in this file, so it is worth getting right.
      */
-    const cell = (v: unknown) => {
-      const text = String(v ?? "");
-      const guarded = /^[=+\-@]/.test(text) ? "'" + text : text;
-      return '"' + guarded.replace(/"/g, '""') + '"';
-    };
+    const cell = csvCell;
 
     const header = ["Code", "Type", "Balance", "Status", "ExpiresAt", "CustomerEmail"];
     const rows = res.items.map((item: any) => [

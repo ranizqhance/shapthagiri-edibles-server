@@ -18,7 +18,7 @@ import { Role } from "@/common/enums/role.enum";
 import { PageOptionsDto } from "@/common/dto/page-options.dto";
 import { paginate } from "@/common/utils/crud.util";
 import { ForbiddenException, NotFoundException } from "@/common/errors/http";
-import { CreateReturnDto, CreateReturnBatchDto, ExchangeDto, RefundReturnDto, ReturnMediaDto } from "@/common/dto/common.dto";
+import { CreateReturnDto, CreateReturnBatchDto, ExchangeDto, RefundReturnDto, ReturnMediaDto, RejectReturnDto, InspectReturnDto, SchedulePickupDto, ConfirmPickupDto } from "@/common/dto/common.dto";
 import { NotificationsModule } from "@/modules/notifications/notifications.module";
 import { NotificationsService } from "@/modules/notifications/notifications.service";
 import { NotificationEventType } from "@/common/enums/notification-event.enum";
@@ -153,25 +153,25 @@ export class ReturnsController {
 
   @RequirePermissions('returns.reject')
   @Post(":id/reject")
-  async reject(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() b: { reason: string }) {
+  async reject(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() b: RejectReturnDto) {
     return await this.returnsService.rejectReturn(u, id, b.reason);
   }
 
   @RequirePermissions('returns.approve')
   @Post(":id/inspect")
-  async inspect(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() b: { status: 'passed' | 'failed', comments?: string, deductRestockingFee?: number, condition?: ItemCondition }) {
+  async inspect(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() b: InspectReturnDto) {
     return await this.returnsService.inspectReturn(u, id, b.status, b.comments, b.deductRestockingFee, b.condition);
   }
 
   @RequirePermissions('returns.approve')
   @Post(":id/schedule-pickup")
-  async schedulePickup(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() b: { scheduledAt: string }) {
+  async schedulePickup(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() b: SchedulePickupDto) {
     return await this.returnsService.schedulePickup(u, id, b?.scheduledAt);
   }
 
   @RequirePermissions('returns.approve')
   @Post(":id/pickup-confirm")
-  async pickup(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() b: { status?: 'picked_up' | 'received_at_shop' }) {
+  async pickup(@CurrentUser() u: JwtPayload, @Param("id") id: string, @Body() b: ConfirmPickupDto) {
     return await this.returnsService.confirmPickup(u, id, b.status);
   }
 

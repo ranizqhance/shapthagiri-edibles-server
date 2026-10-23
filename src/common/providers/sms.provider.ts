@@ -3,6 +3,7 @@ import { env } from "@/config/env";
 import { logger } from "@/common/utils/logger";
 import { SmsProviderException, OtpPhoneUnavailableException } from "@/common/errors/integration";
 import { OtpInvalidException } from "@/common/errors/domain";
+import { withTimeout } from "@/common/utils/timeout.util";
 
 /**
  * SMS / OTP provider — backed by Firebase Authentication.
@@ -36,7 +37,7 @@ export class SmsProvider {
    * Verify a Firebase ID token (returned to the client by Firebase Auth phone OTP flow).
    * Returns the verified phone number if successful.
    */
-  async verifyIdToken(idToken: string): Promise<{ uid: string; phone: string | null; email: string | null }> {
+  async verifyIdToken(idToken: string): Promise<{ uid: string; phone: string | null; email: string | null; emailVerified: boolean }> {
     const fb = getFirebase();
     if (!fb) {
       // Fail CLOSED. This function is the only proof that the caller owns the
@@ -60,18 +61,20 @@ export class SmsProvider {
       const parts = idToken.split("-");
       const phone = parts[2] || "+919876500000";
       const uid = `stub_uid_${phone.replace(/\D/g, "")}`;
-      return {
-        uid,
-        phone,
-        email: `${uid}@stub.user`,
-      };
+      // Shaped like a real Firebase phone-auth token, which carries no email:
+      // a stub that invents one hides every code path that handles its absence.
+      return { uid, phone, email: null, emailVerified: false };
     }
     try {
-      const decoded = await fb.auth().verifyIdToken(idToken);
+      // Bounded: a hung call to Google would otherwise hold the sign-in request open.
+      const decoded = await withTimeout(fb.auth().verifyIdToken(idToken), 10_000, "Firebase verifyIdToken");
       return {
         uid: decoded.uid,
         phone: (decoded.phone_number as string) ?? null,
         email: (decoded.email as string) ?? null,
+        // An email on a Firebase token is only proof of ownership when Firebase
+        // says it verified it; auth.service matches accounts on it only then.
+        emailVerified: decoded.email_verified === true,
       };
     } catch (e) {
       throw new OtpInvalidException();

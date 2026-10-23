@@ -92,7 +92,7 @@ export class EmailDeliveryService {
 
   /** Paginated delivery history for the admin view. */
   async history(opts: { page?: number; limit?: number; context?: string; status?: string } = {}) {
-    const page = Math.max(1, Number(opts.page) || 1);
+    const page = Math.min(10_000, Math.max(1, Number(opts.page) || 1));
     const limit = Math.min(100, Math.max(1, Number(opts.limit) || 20));
     const where: any = {};
     if (opts.context) where.context = opts.context;

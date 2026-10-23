@@ -7,6 +7,7 @@ import { Dispute, DisputeMessage, Order, User, Payment, PaymentRefund, AuditLog 
 import { JwtPayload } from "@/modules/auth/jwt.strategy";
 import { Role } from "@/common/enums/role.enum";
 import { BadRequestException, ForbiddenException, NotFoundException, ConflictException } from "@/common/errors/http";
+import { hasPermission } from "@/common/utils/permission.util";
 import { NotificationsService } from "@/modules/notifications/notifications.service";
 import { WalletService } from "@/modules/wallet/wallet.service";
 import { GiftCardService } from "@/modules/promotions/gift-card.service";
@@ -40,7 +41,9 @@ export class DisputesService {
     private readonly giftCards: GiftCardService,
   ) {}
 
-  private isStaff(role: string) { return STAFF.includes(role as Role); }
+  // Staff = holds the disputes permission. Judged by RBAC, not the role enum:
+  // custom roles are stored as `support`, which used to make every one staff.
+  private isStaff(user: JwtPayload) { return hasPermission(user, "disputes.view"); }
 
   private slaDueAt(priority: string): Date {
     const hours = SLA_HOURS[priority] ?? SLA_HOURS.medium;
@@ -60,13 +63,13 @@ export class DisputesService {
 
   /** Owner (customer) or any staff may view; mutations are staff-gated by callers. */
   private assertViewAccess(user: JwtPayload, d: Dispute) {
-    if (this.isStaff(user.role)) return;
-    if (user.role === Role.CUSTOMER && d.customerId === user.sub) return;
+    if (this.isStaff(user)) return;
+    if (d.customerId === user.sub) return;
     throw new ForbiddenException("AUTH_FORBIDDEN");
   }
 
   private assertStaff(user: JwtPayload) {
-    if (!this.isStaff(user.role)) throw new ForbiddenException("AUTH_FORBIDDEN");
+    if (!this.isStaff(user)) throw new ForbiddenException("AUTH_FORBIDDEN");
   }
 
   private assertTransition(d: Dispute, allowedFrom: string[]) {
@@ -83,11 +86,14 @@ export class DisputesService {
   async createDispute(user: JwtPayload, dto: any): Promise<Dispute> {
     const order = await this.orders.findByPk(dto.orderId);
     if (!order) throw new NotFoundException("NOT_FOUND", "Order not found");
-    // A customer may only dispute their own order; staff may file on behalf.
-    if (user.role === Role.CUSTOMER && order.userId !== user.sub) {
-      throw new ForbiddenException("AUTH_FORBIDDEN");
+    // Only staff with disputes permission may file on a customer's behalf;
+    // everyone else only on their own order. This used to test role ===
+    // CUSTOMER, so a delivery partner could open a dispute on any order — in
+    // the customer's name. "Not yours" reads as missing, so ids can't be probed.
+    if (!hasPermission(user, "disputes.view") && order.userId !== user.sub) {
+      throw new NotFoundException("NOT_FOUND", "Order not found");
     }
-    const customerId = user.role === Role.CUSTOMER ? user.sub : order.userId;
+    const customerId = order.userId;
     const priority = dto.priority || "medium";
 
     const dispute = await this.disputes.create({
@@ -150,7 +156,7 @@ export class DisputesService {
       { model: User, as: "customer", attributes: ["id", "name", "email"] },
       { model: User, as: "agent", attributes: ["id", "name", "email"] },
       { model: Order, as: "order", attributes: ["id", "orderNumber", "total", "paymentMethod", "createdAt"] },
-    ], { subQuery: false, order: [["createdAt", opts.order || "DESC"]] });
+    ], { subQuery: false, order: [["createdAt", String(opts.order ?? "DESC").toUpperCase() === "ASC" ? "ASC" : "DESC"]] });
   }
 
   /** Customer's own disputes. */
@@ -175,6 +181,7 @@ export class DisputesService {
       where: { entity: "Dispute", entityId: id },
       order: [["createdAt", "ASC"]],
       include: [{ model: User, as: "actor", attributes: ["id", "name"] }],
+      limit: 500, // a thread, bounded
     });
     return { dispute: d, messages, timeline };
   }
@@ -184,11 +191,12 @@ export class DisputesService {
   private async listMessages(user: JwtPayload, d: Dispute) {
     const where: any = { disputeId: d.id };
     // Customers never see internal staff notes.
-    if (!this.isStaff(user.role)) where.internal = false;
+    if (!this.isStaff(user)) where.internal = false;
     return this.messages.findAll({
       where,
       order: [["createdAt", "ASC"]],
       include: [{ model: User, as: "sender", attributes: ["id", "name", "email"] }],
+      limit: 500, // a thread, bounded
     });
   }
 
@@ -201,7 +209,7 @@ export class DisputesService {
   async postMessage(user: JwtPayload, id: string, dto: any) {
     const d = await this.load(id);
     this.assertViewAccess(user, d);
-    const staff = this.isStaff(user.role);
+    const staff = this.isStaff(user);
     const internal = staff ? !!dto.internal : false; // only staff can mark internal
     const msg = await this.messages.create({
       disputeId: id,
@@ -323,6 +331,10 @@ export class DisputesService {
       const d = await this.load(id, t);
       this.assertTransition(d, ["open", "under_review", "awaiting_customer", "escalated"]);
       const order = await this.orders.findByPk(d.orderId, { transaction: t });
+      // A dispute pays back at most what the order cost the customer.
+      if (monetary && amount > Number(order?.total ?? 0) + 0.001) {
+        throw new BadRequestException("BAD_REQUEST", `A resolution cannot exceed the order total (₹${Number(order?.total ?? 0).toFixed(2)}).`);
+      }
 
       // Execute the monetary remedy exactly once (idempotency keyed on the dispute).
       if (resType === "refund_wallet") {
@@ -337,7 +349,13 @@ export class DisputesService {
       } else if (resType === "refund_source") {
         const payment = await this.payments.findOne({ where: { orderId: d.orderId, status: "captured" }, transaction: t });
         if (!payment) throw new BadRequestException("BAD_REQUEST", "No captured online payment to refund to source. Use wallet credit instead.");
-        if (amount > Number(payment.amount)) throw new BadRequestException("BAD_REQUEST", "Refund exceeds the captured payment amount.");
+        // Against what is still unrefunded on the payment — returns, a
+        // cancellation or an earlier resolution may already have paid some back.
+        const prior = (await this.refunds.findAll({ where: { paymentId: payment.id, status: ["pending", "processing", "succeeded"] as any }, attributes: ["amount"], transaction: t }))
+          .reduce((sum: number, r: any) => sum + Number(r.amount), 0);
+        if (amount > Number(payment.amount) - prior + 0.001) {
+          throw new BadRequestException("BAD_REQUEST", `Refund exceeds the ₹${(Number(payment.amount) - prior).toFixed(2)} still refundable on this payment.`);
+        }
         const res = await paymentProvider.refund(payment.gatewayRef ?? payment.id, amount);
         await this.refunds.create({ paymentId: payment.id, amount, reason: `Dispute ${id.slice(0, 8)}`, status: res.status, refundRef: res.refundRef || `disp_${id.slice(0, 8)}` } as any, { transaction: t });
       }
