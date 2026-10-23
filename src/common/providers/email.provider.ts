@@ -1,8 +1,8 @@
 import nodemailer, { Transporter } from "nodemailer";
-import { env } from "@/config/env";
+import { env, isProd } from "@/config/env";
 import { logger } from "@/common/utils/logger";
 import { BRAND } from "@/common/brand";
-import { EmailProviderException } from "@/common/errors/integration";
+import { EmailNotConfiguredException, EmailProviderException } from "@/common/errors/integration";
 
 /**
  * Connect, greeting and idle-socket limits for SMTP. nodemailer's defaults are
@@ -75,6 +75,41 @@ export class EmailProvider {
           `Email credentials rejected (${describe}) — mail will fail until this is fixed: ${(e as Error).message}`
         )
       );
+  }
+
+  /** True when a send can actually leave this server (not disabled, credentials set). */
+  isConfigured(): boolean {
+    return env.ENABLE_EMAIL && !!((env.GMAIL_USER && env.GMAIL_APP_PASSWORD) || (env.MAIL_USER && env.MAIL_PASS));
+  }
+
+  /**
+   * For flows whose whole point is the email — a reset link, a sign-in code.
+   *
+   * In stub mode a send "succeeds" without leaving the server, so the API told
+   * a customer "a code has been sent" when nothing had been. On the test site,
+   * with no mail credentials set, that is exactly how password resets failed
+   * without a trace. Production refuses instead; development keeps the stub.
+   * Callers check this before looking any account up, so the refusal is the
+   * same for every address and says nothing about which ones are registered.
+   */
+  assertDeliverable(): void {
+    if (isProd && !this.isConfigured()) {
+      logger.error("Email is not configured (set GMAIL_USER + GMAIL_APP_PASSWORD): reset links and email codes cannot be sent");
+      throw new EmailNotConfiguredException();
+    }
+  }
+
+  /**
+   * One line at startup: either the SMTP login is checked now (logs "Email
+   * ready" or "credentials rejected"), or the log says mail is not set up —
+   * instead of finding out from the first customer who never got a reset link.
+   */
+  checkAtBoot(): void {
+    if (this.isConfigured()) {
+      this.getTransport();
+    } else if (isProd) {
+      logger.error("Email is not configured (set GMAIL_USER + GMAIL_APP_PASSWORD): reset links and email codes will be refused");
+    }
   }
 
   // Gmail requires the From address to be the authenticated account.

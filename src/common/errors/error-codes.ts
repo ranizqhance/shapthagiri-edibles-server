@@ -76,6 +76,9 @@ export const ERROR_CODES = {
   INT_GEOCODING_FAILED:       { status: 502, message: "Address lookup service unavailable" },
   INT_SMS_FAILED:             { status: 502, message: "SMS service unavailable" },
   INT_EMAIL_FAILED:           { status: 502, message: "Email service unavailable" },
+  // No mail credentials on this server: nothing can be emailed at all. Distinct
+  // from INT_EMAIL_FAILED (one send failed) so the log says what to fix.
+  EMAIL_NOT_CONFIGURED:       { status: 503, message: "We can't send email right now. Please try again later or contact us." },
   INT_STORAGE_FAILED:         { status: 502, message: "File upload service unavailable" },
   INT_DB_ERROR:               { status: 500, message: "Database error" },
   INT_GATEWAY_ERROR:          { status: 502, message: "External gateway error" },

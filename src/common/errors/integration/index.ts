@@ -12,4 +12,6 @@ export class SmsProviderException extends IntegrationException { constructor(cau
 /** Phone OTP is not verifiable right now — the customer should use email. */
 export class OtpPhoneUnavailableException extends IntegrationException { constructor(cause?: Error) { super("OTP_PHONE_UNAVAILABLE", undefined, undefined, cause); } }
 export class EmailProviderException extends IntegrationException { constructor(cause?: Error) { super("INT_EMAIL_FAILED", undefined, undefined, cause); } }
+/** No mail credentials are set, so every send would be a stub. */
+export class EmailNotConfiguredException extends IntegrationException { constructor() { super("EMAIL_NOT_CONFIGURED"); } }
 export class StorageException extends IntegrationException { constructor(cause?: Error) { super("INT_STORAGE_FAILED", undefined, undefined, cause); } }

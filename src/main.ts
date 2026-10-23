@@ -15,6 +15,7 @@ import { env, isProd } from "./config/env";
 import { BRAND } from "./common/brand";
 import { expandCorsOrigins } from "./common/utils/cors-origins.util";
 import { getFirebase } from "./config/firebase";
+import { emailProvider } from "./common/providers/email.provider";
 import { ZoneCacheService } from "./modules/delivery-engine/zone-cache.service";
 import { RedisIoAdapter } from "./common/adapters/redis-io.adapter";
 import { auditRouteGates, registerSelfServiceHandlers } from "./common/security/route-gates";
@@ -287,6 +288,7 @@ async function bootstrap() {
   const log = new Logger("Bootstrap");
   log.log(`🚀 ${BRAND.name} API listening on http://localhost:${env.PORT}${env.API_PREFIX}`);
   log.log(`📚 Swagger UI  → http://localhost:${env.PORT}/api/docs`);
+  emailProvider.checkAtBoot();
 }
 
 bootstrap();

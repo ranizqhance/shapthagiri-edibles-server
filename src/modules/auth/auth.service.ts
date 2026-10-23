@@ -347,6 +347,8 @@ export class AuthService {
    * same generic message — never reveals whether the email is registered.
    */
   async forgotPassword(email: string) {
+    // Before the lookup: the same answer for every address, registered or not.
+    emailProvider.assertDeliverable();
     const emailKey = email.toLowerCase().trim();
     const user = await this.userModel.findOne({ where: { email: emailKey } });
 
@@ -476,6 +478,7 @@ export class AuthService {
 
   /** Generate a 6-digit OTP, store only its hash + a 10-min expiry, and email it. */
   async sendRegistrationEmailOtp(email: string, name?: string) {
+    emailProvider.assertDeliverable();
     const emailKey = email.toLowerCase().trim();
 
     const existing = await this.userModel.findOne({ where: { email: emailKey } });
@@ -496,6 +499,7 @@ export class AuthService {
    * address has an account.
    */
   async sendCheckoutEmailOtp(email: string) {
+    emailProvider.assertDeliverable();
     const emailKey = email.toLowerCase().trim();
     const code = await this.issueOtp(emailKey, "email", OTP_PURPOSE_CHECKOUT);
     return this.mailOtp(emailKey, code);
