@@ -23,6 +23,7 @@ import { hashPassword } from "@/common/utils/password.util";
 import { buildDeliveryPartnerDefaults, createPartnerDocuments } from "@/common/utils/partner.util";
 import { BadRequestException, NotFoundException, ForbiddenException } from "@/common/errors/http";
 import { Public } from "@/common/decorators/public.decorator";
+import { env } from "@/config/env";
 import { PricingService } from "@/modules/orders/pricing.service";
 
 /** Documents required to onboard a delivery partner via Invite Member. */
@@ -494,6 +495,11 @@ export class PublicSettingsController {
   /**
    * The business's public contact details — name, phones, WhatsApp, support
    * email — for the storefront's contact links, readable signed out.
+   *
+   * Also whether online payment is on, so checkout follows the API's one
+   * switch (ONLINE_PAYMENTS_ENABLED) instead of a value baked into the web
+   * build — which is how the storefront came to offer cash on delivery only
+   * while the API was taking online payment.
    */
   @Public()
   @Get("public")
@@ -501,6 +507,7 @@ export class PublicSettingsController {
     const rows = await this.setting.findAll({ where: { key: { [Op.in]: PUBLIC_SETTING_KEYS as unknown as string[] } } });
     const out: Record<string, unknown> = {};
     for (const key of PUBLIC_SETTING_KEYS) out[key] = rows.find((r) => r.key === key)?.value ?? null;
+    out["payments.online"] = env.ONLINE_PAYMENTS_ENABLED;
     return out;
   }
 }

@@ -48,8 +48,8 @@ export const ERROR_CODES = {
   // Not thrown — COD is open to every signed-in customer.
   // Kept so an older client that still handles the code does not see an unknown one.
   COD_REQUIRES_PHONE:         { status: 400, message: "Cash on delivery needs a verified mobile number" },
-  // Not thrown — COD places a real order again. Kept for older clients.
-  COD_VIA_WHATSAPP:           { status: 400, message: "Cash on delivery orders are placed over WhatsApp" },
+  // Cash on delivery creates no order: the storefront sends it to the shop on WhatsApp.
+  COD_VIA_WHATSAPP:          { status: 400, message: "Cash on delivery orders are placed over WhatsApp" },
 
   // Payments
   PAY_DECLINED:               { status: 402, message: "Payment was declined by the bank" },

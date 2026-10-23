@@ -85,10 +85,25 @@ export class OrdersService {
    * decrement, which makes overselling impossible under concurrency.
    */
   async create(userId: string, input: any, idemKey?: string | null) {
-    // Cash on delivery places a real order: status PLACED, payment PENDING, no
-    // gateway leg and no payment-hold expiry (expireUnpaidOrders only sweeps
-    // PAYMENT_PENDING). Staff record the cash with POST payments/cod/confirm/:id
-    // once the parcel is paid for.
+    // Cash on delivery does not create an order. The storefront builds a
+    // WhatsApp message instead and the shop works it by hand, so nothing is
+    // written here — no order, no shipment, no stock movement.
+    //
+    // Refused server-side rather than only in the UI: a stale client, a
+    // replayed request or a direct API call would otherwise still put a COD
+    // order in the dashboard.
+    //
+    // Outside withIdempotency deliberately. That helper does a findOrCreate on
+    // the key before running the body, so a guard inside it would still leave
+    // an idempotency_keys row behind for an order that writes nothing at all.
+    //
+    // Only new orders are refused. Existing COD orders keep working (cash
+    // confirmation, invoices), and the exchange path writes its replacement
+    // order straight through the model, so it is unaffected.
+    if (input.paymentMethod === PaymentMethod.COD) {
+      throw new AppBadRequestException("COD_VIA_WHATSAPP", "Cash on delivery orders are placed over WhatsApp, not here.");
+    }
+
     return withIdempotency(this.idem, { key: idemKey, endpoint: "orders.create", payload: { userId, ...input } }, () =>
       this.sequelize.transaction(async (t) => {
         let cart: Cart | null = null;

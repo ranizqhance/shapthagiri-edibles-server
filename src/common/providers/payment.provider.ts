@@ -65,6 +65,14 @@ function withGatewayTimeout<T>(label: string, work: Promise<T>): Promise<T> {
   return Promise.race([work, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
 }
 
+/**
+ * Rupees to the gateway's integer paise. `145.5 * 100` is 14550.000000000002 in
+ * floating point: Razorpay rejects a non-integer amount, and the strict amount
+ * check in verifyPaymentDetails could never match it. The webhook already
+ * rounds this way.
+ */
+export const toPaise = (rupees: number | string) => Math.round(Number(rupees) * 100);
+
 export class PaymentProvider {
   get gateway(): string {
     return env.PAYMENT_KEY_SECRET ? env.PAYMENT_GATEWAY : "mock";
@@ -83,7 +91,7 @@ export class PaymentProvider {
     // ── Live Razorpay integration ──────────────────────────────────────
     if (this.gateway === "razorpay") {
       const razorpay = new Razorpay({ key_id: env.PAYMENT_KEY_ID, key_secret: env.PAYMENT_KEY_SECRET });
-      const order = await withGatewayTimeout("orders.create", razorpay.orders.create({ amount: amount * 100, currency, receipt: orderId }));
+      const order = await withGatewayTimeout("orders.create", razorpay.orders.create({ amount: toPaise(amount), currency, receipt: orderId }));
       return { clientSecret: order.id, ref: order.id, gateway: "razorpay" };
     }
     throw new Error(`Payment gateway "${env.PAYMENT_GATEWAY}" is configured but no adapter is implemented`);
@@ -99,7 +107,7 @@ export class PaymentProvider {
     }
     if (this.gateway === "razorpay") {
       const razorpay = new Razorpay({ key_id: env.PAYMENT_KEY_ID, key_secret: env.PAYMENT_KEY_SECRET });
-      const refundObj = await withGatewayTimeout("payments.refund", razorpay.payments.refund(gatewayRef, { amount: amount * 100 }));
+      const refundObj = await withGatewayTimeout("payments.refund", razorpay.payments.refund(gatewayRef, { amount: toPaise(amount) }));
       // Razorpay refunds are asynchronous and normally return "pending" here.
       // Reporting "succeeded" unconditionally marked orders refunded before the
       // money had actually moved — report what the gateway really said.
@@ -188,7 +196,7 @@ export class PaymentProvider {
         if (
           (payment.status === "captured" || payment.status === "authorized") &&
           payment.order_id === expectedOrderId &&
-          payment.amount === expectedAmount * 100 &&
+          payment.amount === toPaise(expectedAmount) &&
           payment.currency === expectedCurrency
         ) {
           // If authorized, we can either capture it here or let the backend do it.
@@ -198,7 +206,7 @@ export class PaymentProvider {
           // Since the task requires webhook-free, we MUST capture it!
           if (payment.status === "authorized") {
              try {
-               await withGatewayTimeout("payments.capture", razorpay.payments.capture(paymentId, expectedAmount * 100, expectedCurrency));
+               await withGatewayTimeout("payments.capture", razorpay.payments.capture(paymentId, toPaise(expectedAmount), expectedCurrency));
                console.log(`[PaymentProvider] Successfully captured authorized payment ${paymentId}`);
              } catch (captureErr) {
                console.error(`[PaymentProvider] Failed to capture authorized payment ${paymentId}`, captureErr);
