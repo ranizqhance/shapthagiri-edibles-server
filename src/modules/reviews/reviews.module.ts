@@ -66,6 +66,18 @@ export class ReviewsController {
     return this.reviews.listForVariant(variantId, opts, { rating: rating ? Number(rating) : undefined, sort });
   }
 
+  /** Approved reviews across all of a product's variants. Takes the id or the slug. */
+  @Public()
+  @Get("product/:product")
+  listForProduct(
+    @Param("product") product: string,
+    @Query() opts: PageOptionsDto,
+    @Query("rating") rating?: string,
+    @Query("sort") sort?: string,
+  ) {
+    return this.reviews.listForProduct(product, opts, { rating: rating ? Number(rating) : undefined, sort });
+  }
+
   /**
    * Batch summaries for a product grid — one query, not one request per card.
    * Declared before "summary/:productId" so the literal wins the match.
@@ -77,7 +89,7 @@ export class ReviewsController {
     return this.reviews.summaryForProducts((productIds || "").split(",").filter(Boolean));
   }
 
-  /** Average, count and star distribution — replaces the fabricated 4.0 default. */
+  /** Average, count and star distribution — replaces the fabricated 4.0 default. Id or slug. */
   @Public()
   @Get("summary/:productId")
   summary(@Param("productId") productId: string) {

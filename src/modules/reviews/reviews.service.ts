@@ -58,8 +58,26 @@ export class ReviewsService {
     @InjectModel(DeliveryReview) private readonly deliveryReviews: typeof DeliveryReview,
     @InjectModel(OrderItem) private readonly orderItems: typeof OrderItem,
     @InjectModel(AuditLog) private readonly audit: typeof AuditLog,
+    @InjectModel(Product) private readonly products: typeof Product,
+    @InjectModel(ProductVariant) private readonly variants: typeof ProductVariant,
     private readonly notifications: NotificationsService,
   ) {}
+
+  /**
+   * A product's id from either form the storefront uses for it.
+   *
+   * Product pages live at /product/<slug> (UUID links redirect there), so the
+   * page only has the slug in hand. The summary endpoint used to accept ids
+   * only and dropped anything else as junk — every product page asked by slug
+   * and got "no reviews" back, even with approved reviews on the product.
+   */
+  private async productIdFrom(idOrSlug: string): Promise<string | null> {
+    if (UUID_RE.test(idOrSlug)) return idOrSlug;
+    const slug = String(idOrSlug || "").trim().toLowerCase().slice(0, 200);
+    if (!slug) return null;
+    const p = await this.products.findOne({ where: { slug }, attributes: ["id"] });
+    return p?.id ?? null;
+  }
 
   /* ─────────────── helpers ─────────────── */
 
@@ -208,11 +226,42 @@ export class ReviewsService {
   }
 
   /**
+   * Approved reviews for every variant of a product — what the product page
+   * shows. Listing by the selected variant only meant a review written for the
+   * 1 L pack was missing from the page while the 500 ml pack was selected,
+   * although the star summary (product-wide) counted it. Each review carries
+   * its variant's attributes so the page can say which pack it was for.
+   */
+  async listForProduct(idOrSlug: string, opts: PageOptionsDto, filters: { rating?: number; sort?: string } = {}) {
+    const productId = await this.productIdFrom(idOrSlug);
+    const variantIds = productId
+      ? (await this.variants.findAll({ where: { productId }, attributes: ["id"], paranoid: false })).map((v) => v.id)
+      : [];
+    // An unknown product is an empty page, not an error.
+    const where: any = { variantId: { [Op.in]: variantIds.length ? variantIds : [null] }, status: "approved" };
+    if (filters.rating) where.rating = Number(filters.rating);
+
+    const order: any =
+      filters.sort === "helpful" ? [["helpfulCount", "DESC"]]
+      : filters.sort === "rating_high" ? [["rating", "DESC"]]
+      : filters.sort === "rating_low" ? [["rating", "ASC"]]
+      : [["createdAt", "DESC"]];
+
+    return await paginate(this.reviews, opts, where, [
+      ...this.publicInclude(),
+      { model: ProductVariant, attributes: ["id", "attributes"], required: false, paranoid: false },
+    ], { order });
+  }
+
+  /**
    * Average + count + star distribution for a product's variants.
    * Approved reviews only, and — unlike the old `COALESCE(AVG(rating), 4.0)` —
    * an unreviewed product reports 0, not a fabricated 4 stars.
+   * Accepts the product's id or its slug.
    */
-  async summaryForProduct(productId: string): Promise<RatingSummary> {
+  async summaryForProduct(idOrSlug: string): Promise<RatingSummary> {
+    const productId = await this.productIdFrom(idOrSlug);
+    if (!productId) return emptySummary();
     const map = await this.summaryForProducts([productId]);
     return map[productId] ?? emptySummary();
   }
