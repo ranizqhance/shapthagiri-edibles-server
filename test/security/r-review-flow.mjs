@@ -69,6 +69,28 @@ try {
   const batch = await api("GET", `/reviews/summary?productIds=${line.productId}`, { headers: ip() });
   check("shop-grid batch summary counts it", (data(batch)?.[line.productId]?.count ?? 0) >= 1, JSON.stringify(data(batch)?.[line.productId] ?? null));
 
+  section("after the product is deleted, the queue still says what was reviewed");
+  {
+    // What happened on the test site: the catalog was rebuilt, the old products
+    // soft-deleted, and every review on them showed in the queue as "Product".
+    await q(`update product_variants set "deletedAt" = now() where id = $1`, [line.variantId]);
+    await q(`update products set "deletedAt" = now() where id = $1`, [line.productId]);
+    try {
+      const queue = await api("GET", "/reviews/admin?status=approved&limit=100", { token: A, headers: ip() });
+      const row = (data(queue)?.items ?? []).find((x) => x.id === reviewId);
+      check("dashboard queue names the deleted product", !!row?.variant?.product?.title, `${said(queue)} title=${row?.variant?.product?.title}`);
+      check("…and marks it deleted", !!(row?.variant?.product?.deletedAt || row?.variant?.deletedAt));
+      const mine = await api("GET", "/reviews/me?limit=50", { token: C, headers: ip() });
+      const own = (data(mine)?.items ?? []).find((x) => x.id === reviewId);
+      check("the customer's own list names it too", !!own?.variant?.product?.title, `title=${own?.variant?.product?.title}`);
+      const pub = await api("GET", `/reviews/product/${line.productId}`, { headers: ip() });
+      check("the public list does not resurrect it on the site", pub.status === 200, said(pub));
+    } finally {
+      await q(`update product_variants set "deletedAt" = null where id = $1`, [line.variantId]);
+      await q(`update products set "deletedAt" = null where id = $1`, [line.productId]);
+    }
+  }
+
   section("rejecting takes it back down");
   const rej = await api("POST", `/reviews/admin/${reviewId}/moderate`, { token: A, body: { status: "rejected", note: "probe" }, headers: ip() });
   check("reject → 2xx", rej.status < 300, said(rej));

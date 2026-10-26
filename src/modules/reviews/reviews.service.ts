@@ -203,9 +203,11 @@ export class ReviewsService {
   }
 
   async listMine(user: JwtPayload, opts: PageOptionsDto) {
+    // Deleted products included (see listForStaff): a customer's own review
+    // should still say what it was for after the product is gone.
     return await paginate(this.reviews, opts, { userId: user.sub }, [
       { model: ReviewMedia, required: false },
-      { model: ProductVariant, include: [{ model: Product, include: [ProductMedia, Brand] }] },
+      { model: ProductVariant, required: false, paranoid: false, include: [{ model: Product, required: false, paranoid: false, include: [ProductMedia, Brand] }] },
     ]);
   }
 
@@ -390,10 +392,15 @@ export class ReviewsService {
       : filters.sort === "helpful" ? [["helpfulCount", "DESC"], ["createdAt", "DESC"]]
       : [["createdAt", "DESC"]]; // newest (default)
 
+    // paranoid: false on the product side. A review keeps pointing at the pack
+    // it was written for; when that product is later deleted (or the catalog
+    // rebuilt), a paranoid include returned nothing and the queue showed a bare
+    // "Product" with no way to tell what was reviewed — or why it never
+    // appears on the site. `deletedAt` comes back so the queue can say so.
     return await paginate(this.reviews, opts, where, [
       { model: ReviewMedia, required: false },
       { model: User, attributes: ["id", "name", "email"], required: false },
-      { model: ProductVariant, include: [{ model: Product, include: [ProductMedia] }] },
+      { model: ProductVariant, required: false, paranoid: false, include: [{ model: Product, required: false, paranoid: false, include: [ProductMedia] }] },
     ], { order });
   }
 
