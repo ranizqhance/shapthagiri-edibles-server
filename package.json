@@ -16,7 +16,8 @@
     "db:seed": "ts-node -r tsconfig-paths/register src/scripts/seed.ts",
     "db:reset": "npm run db:sync:force && npm run db:seed",
     "lint": "eslint src --ext .ts",
-    "db:rerandomise-derived-passwords": "ts-node -r tsconfig-paths/register src/scripts/rerandomise-derived-passwords.ts"
+    "db:rerandomise-derived-passwords": "ts-node -r tsconfig-paths/register src/scripts/rerandomise-derived-passwords.ts",
+    "db:cleanup-demo-reviews": "ts-node -r tsconfig-paths/register src/scripts/cleanup-demo-reviews.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1073.0",

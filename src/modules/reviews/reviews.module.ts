@@ -35,6 +35,17 @@ export class ReviewsController {
     return this.reviews.listMine(u, opts);
   }
 
+  /**
+   * Whether the caller can review this product right now, and if not, why —
+   * so the product page can offer "Write a review" to the people who may, and
+   * say something useful to everyone else. Scoped to the caller's own orders.
+   */
+  @ApiBearerAuth()
+  @Get("eligibility/:product")
+  eligibility(@CurrentUser() u: JwtPayload, @Param("product") product: string) {
+    return this.reviews.eligibilityForProduct(u, product);
+  }
+
   @ApiBearerAuth()
   @Post(":id/helpful")
   helpful(@CurrentUser() u: JwtPayload, @Param("id") id: string) {

@@ -123,13 +123,30 @@ export class ReviewsService {
    * review per purchased line item.
    */
   async create(user: JwtPayload, variantId: string, body: { rating: number; text?: string; media?: string[] }) {
-    const purchase = await this.findPurchase(user.sub, variantId);
-    if (!purchase) {
+    const latest = await this.findPurchase(user.sub, variantId);
+    if (!latest) {
       throw new ForbiddenException("AUTH_FORBIDDEN", "You can only review a product you have received.");
     }
 
-    const existing = await this.reviews.findOne({ where: { userId: user.sub, orderItemId: purchase.id } });
-    if (existing) {
+    // One review per delivered line. Someone who bought this pack twice may
+    // have reviewed the newer order already; use a delivered line that is still
+    // open rather than refusing because the newest one is taken — the product
+    // page offers the form on exactly that basis (eligibilityForProduct).
+    const delivered = await this.orderItems.findAll({
+      where: { variantId },
+      include: [{
+        model: OrderShipment, required: true,
+        where: { status: { [Op.in]: [OrderStatus.DELIVERED, OrderStatus.COMPLETED] } },
+        include: [{ model: Order, required: true, where: { userId: user.sub } }],
+      }],
+      order: [["createdAt", "DESC"]],
+    });
+    const taken = new Set(
+      (await this.reviews.findAll({ where: { userId: user.sub, orderItemId: { [Op.in]: delivered.map((l) => l.id) } }, attributes: ["orderItemId"] }))
+        .map((r) => r.orderItemId),
+    );
+    const purchase = delivered.find((l) => !taken.has(l.id));
+    if (!purchase) {
       throw new ConflictException("CONFLICT", "You have already reviewed this purchase.");
     }
 
@@ -200,6 +217,66 @@ export class ReviewsService {
 
     await review.destroy();
     return { deleted: true };
+  }
+
+  /**
+   * Can this customer review this product, and with which pack?
+   *
+   * The rule is the one create() enforces: a delivered purchase, one review per
+   * purchased line. This only reads it ahead of time, so the product page can
+   * show the form to the people it will accept and a reason to everyone else:
+   *   not_purchased   — no order for any pack of this product
+   *   not_delivered   — ordered, but nothing delivered yet
+   *   already_reviewed — every delivered line already has a review
+   * Their own reviews of the product come back too, so the page can say
+   * "awaiting approval" instead of showing nothing after they submit.
+   */
+  async eligibilityForProduct(user: JwtPayload, idOrSlug: string) {
+    const productId = await this.productIdFrom(idOrSlug);
+    const empty = { canReview: false, reason: "not_purchased" as const, packs: [], myReviews: [] };
+    if (!productId) return empty;
+
+    const variants = await this.variants.findAll({ where: { productId }, attributes: ["id", "attributes"], paranoid: false });
+    const variantIds = variants.map((v) => v.id);
+    if (!variantIds.length) return empty;
+
+    const lines = await this.orderItems.findAll({
+      where: { variantId: { [Op.in]: variantIds } },
+      attributes: ["id", "variantId"],
+      include: [{
+        model: OrderShipment, required: true, attributes: ["id", "status"],
+        include: [{ model: Order, required: true, attributes: ["id"], where: { userId: user.sub } }],
+      }],
+    });
+    const myReviews = await this.reviews.findAll({
+      where: { userId: user.sub, variantId: { [Op.in]: variantIds } },
+      attributes: ["id", "variantId", "orderItemId", "status", "rating", "createdAt"],
+      order: [["createdAt", "DESC"]],
+    });
+
+    const reviewedLines = new Set(myReviews.map((r) => r.orderItemId).filter(Boolean));
+    const delivered = lines.filter((l: any) => [OrderStatus.DELIVERED, OrderStatus.COMPLETED].includes(l.shipment?.status));
+    const open = delivered.filter((l) => !reviewedLines.has(l.id));
+
+    const labelOf = (variantId: string) => {
+      const attrs = (variants.find((v) => v.id === variantId)?.attributes ?? {}) as Record<string, string>;
+      return Object.values(attrs).filter(Boolean).join(" · ") || null;
+    };
+    // One entry per pack, whichever of its delivered lines is still open.
+    const packs = [...new Map(open.map((l) => [l.variantId, { variantId: l.variantId, label: labelOf(l.variantId) }])).values()];
+
+    const reason =
+      open.length ? null
+      : !lines.length ? "not_purchased"
+      : !delivered.length ? "not_delivered"
+      : "already_reviewed";
+
+    return {
+      canReview: open.length > 0,
+      reason,
+      packs,
+      myReviews: myReviews.map((r) => ({ id: r.id, status: r.status, rating: r.rating, pack: labelOf(r.variantId), createdAt: r.createdAt })),
+    };
   }
 
   async listMine(user: JwtPayload, opts: PageOptionsDto) {

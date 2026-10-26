@@ -121,6 +121,7 @@ export const SELF_SERVICE_ROUTES: ReadonlySet<string> = new Set([
   "POST /returns/batch",
   "DELETE /reviews/:id",
   "GET /reviews/me",
+  "GET /reviews/eligibility/:product",
   "GET /reviews/my-votes",
   "PATCH /reviews/:id",
   "POST /reviews/:id/helpful",

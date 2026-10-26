@@ -31,15 +31,32 @@ if (!line) {
   process.exit(2);
 }
 const [{ status: shipmentWas }] = await q(`select status from order_shipments where id = $1`, [line.shipmentId]);
-await q(`update order_shipments set status = 'delivered' where id = $1`, [line.shipmentId]);
 
 let reviewId = null;
 try {
+  section("the product page knows who may review");
+  const guest = await api("GET", `/reviews/eligibility/${line.slug}`, { headers: ip() });
+  check("signed out → 401 (the page shows 'sign in to review')", guest.status === 401, said(guest));
+  const stranger = await api("GET", `/reviews/eligibility/${line.slug}`, { token: A, headers: ip() });
+  check("someone who never bought it → not_purchased", data(stranger)?.canReview === false && data(stranger)?.reason === "not_purchased", JSON.stringify(data(stranger)?.reason));
+  await q(`update order_shipments set status = 'shipped' where id = $1`, [line.shipmentId]);
+  const notYet = await api("GET", `/reviews/eligibility/${line.slug}`, { token: C, headers: ip() });
+  check("ordered but not delivered → not_delivered", data(notYet)?.canReview === false && data(notYet)?.reason === "not_delivered", JSON.stringify(data(notYet)?.reason));
+  const early = await api("POST", `/reviews/products/${line.variantId}`, { token: C, body: { rating: 5, text: "too early" }, headers: ip() });
+  check("…and a review sent anyway is refused", early.status === 403, said(early));
+  await q(`update order_shipments set status = 'delivered' where id = $1`, [line.shipmentId]);
+  const ready = await api("GET", `/reviews/eligibility/${line.slug}`, { token: C, headers: ip() });
+  check("delivered → canReview with that pack offered", data(ready)?.canReview === true && (data(ready)?.packs ?? []).some((p) => p.variantId === line.variantId), JSON.stringify(data(ready)?.packs));
+
   section("the customer reviews what they received");
   const text = `Fragrant and clean — review probe ${Date.now()}`;
   const created = await api("POST", `/reviews/products/${line.variantId}`, { token: C, body: { rating: 5, text }, headers: ip() });
   reviewId = data(created)?.id;
   check("review accepted for moderation", created.status < 300 && data(created)?.status === "pending", said(created));
+  const after = await api("GET", `/reviews/eligibility/${line.slug}`, { token: C, headers: ip() });
+  check("eligibility now: already_reviewed, with their pending review", data(after)?.reason === "already_reviewed" && (data(after)?.myReviews ?? []).some((r) => r.id === reviewId && r.status === "pending"), JSON.stringify(data(after)?.reason));
+  const twice = await api("POST", `/reviews/products/${line.variantId}`, { token: C, body: { rating: 4, text: "again" }, headers: ip() });
+  check("a second review of the same delivered line → 409", twice.status === 409, said(twice));
 
   const listed = (r) => (data(r)?.items ?? []).some((x) => x.id === reviewId);
   const pendingList = await api("GET", `/reviews/product/${line.productId}`, { headers: ip() });
